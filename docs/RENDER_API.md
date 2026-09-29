@@ -60,6 +60,7 @@ night strength) are renderer-agnostic.
 | `target` | id \| null | partner/opponent id while interacting |
 | `bondWith` | id \| null | "in love" partner (walk together, sit together; lasts ~2 game hours) |
 | `seat` | index \| null | `city.seats` index while eating |
+| `bed`, `bench`, `indoors` | | current rest: `'home' \| 'bench'`, the `city.benches` index, and whether the figure is inside the house (renderers hide it; `CitizenView.indoors`) |
 | `hurtUntil` | s | `time < hurtUntil` ⇒ flash the body (a blow just landed) |
 | `threat` | `Pt \| null` | what a flee is running from |
 | `body` | `{hunger,dust,energy,injury}` | 0..1 |
@@ -77,14 +78,14 @@ night strength) are renderer-agnostic.
 | goal | phases | notes |
 |---|---|---|
 | `wander` | `walk/walk` → `idle/lookAround` (2–6 s) | stroll to a time-of-day POI at pace 0.6; bonded followers use `walk/together`, `idle/together` |
-| `eatOut` | `walk/approach` → `idle/sit` (1.5 s) → `eat/eat` (15–25 s) → `idle/sit` (linger 5 s) → `walk/leave` | claims a `city.seats` chair (facing its table); market = standing slot: `approach` → `eat` → `leave`. Events "X sits down at …" / "X grabs a bite at …" / "X finishes lunch". Bonded partners take the same table. |
+| `eatOut` | `walk/approach` → `idle/sit` (1.5 s) → `eat/eat` (15–25 s) → `idle/sit` (linger 5 s) → `walk/leave` | claims a free `city.seats` chair (facing its table); market = standing slot: `approach` → `eat` → `leave`. When every seat is taken: `walk/approach` → `idle/queue` at a `city.queueSpots` spot until one frees (never pushes in). Events "X sits down at …" / "X grabs a bite at …" / "X finishes lunch". Bonded partners take the same table. |
 | `groom` | `walk/approach` (step aside to a bench) → `groom/groom` (4–6 s) | dust drains |
 | `court` (male) | `walk/approach` → `sing/sing` (4–8 s, facing her) → `court/dance` (3 s, orbits her at 28 px) → bond ; or → `idle/turnedDown` (3 s) | events "X sings to Y", "X got turned down by Y", "X and Y fell in love" |
 | `courted` (female) | `idle/idle` → `idle/listen` (faces him) → `court/dance` | `singHeardUntil` is set while he sings |
 | `bond` (both) | `walk/together` → `idle/sitTogether` (20 s on a park bench, hearts every 6 s) | then `bondWith` persists ~2 game hours while they stroll together |
 | `confront` (both) | `walk/approach` (`idle/squareUp` for the one already there) → `fight/stare` (2 s, 30 px apart) → 3–5 exchanges: striker `fight/strike` (0.3 s lunge) → `fight/recoil`; victim `fight/guard` → `fight/stagger` (+ `hurtUntil`, knockback, `sparks`) → resolution: winner `idle/strut` (3 s), loser → `flee` | events "X and Y square up", "X punches Y", "X wins; Y flees" |
 | `flee` | `escape/crouch` (0.12 s) → `escape/dash` (1.5 s; 6 s on panic) → `idle/lookBack` (1 s) | dash at 2.3 × max speed away from `threat` |
-| `rest` | `walk/approach` (home or bench) → `sleep/lie` (2 s) → `sleep/sleep` → `sleep/wake` (2 s, stretch) | events "X heads home" / "X heads for a bench" |
+| `rest` | home: `walk/approach` → `idle/enter` (0.8 s, fade out) → `sleep/sleep` with `indoors = true` (hidden inside until dawn / rested) → `idle/exit` (0.8 s, fade in at the door) → `idle/stretch` (2 s). Bench (only when exhausted, one sleeper per bench): `walk/approach` → `idle/align` (turns along the bench axis) → `sleep/lie` (2 s) → `sleep/sleep` → `sleep/wake` (2 s, lying) → `idle/standUp` (1 s) | `agent.bed` is `'home' \| 'bench'`; a bench sleeper is pinned at the bench centre lying along `benchAxis()` (perpendicular to the direction to the nearer of plaza/park centre — the same rule city3d uses to orient benches). Nobody ever sleeps on pavement, roads or POIs. Events "X heads home" / "X heads for a bench" |
 | `chat` | `walk/approach` (lead) / `idle/listen` → `sing/talk` ⇄ `idle/listen` (turns 1.5–2.5 s, 6–10 s total) | "talking" = alternating song bubbles; event "X and Y chat" |
 | `bar` | `walk/walk` → `idle/hangOut` (20–60 s, evenings) | chats start between people hanging out |
 | `festival` | `walk/walk` → party: `sing/talk` \| `sing/sing` \| `court/dance` bouts of 3–6 s | dance beat: 120 bpm on `actionT` |
@@ -100,9 +101,10 @@ night strength) are renderer-agnostic.
 | `roadsH`, `roadsV` | `Rect[]` | asphalt strips; the block rects are sidewalks |
 | `buildings` | `Building[]` | `{x,y,w,h, kind:'house'|'shop'|'cafe'|'market'|'bar'|'kiosk', roof:'terracotta'|'flat'|'green'|'glass'|'shop', floors, color, door:{x,y}, name?}`; `door` is on the sidewalk-facing edge; venue terrace POIs sit ~34 px outside the door |
 | `food` | `Poi[]` | `[Café Lumen, Café Ombra, Corner Market]`; index = `Seat.venue` |
-| `seats` | `Seat[]` | `{x, y, venue, table, facing, standing}` — café chairs (2 per table, 3 tables per café, chair 12 px from its table) and 5 standing market slots; place chairs/tables exactly here |
+| `seats` | `Seat[]` | `{x, y, venue, table, facing, standing}` — café chairs (2 per table, 3 tables per café, chair 14 px from its table, adjacent chairs ≥ 26 px apart, all outside the awning) and 5 standing market slots (28 px apart, in front of the counter, outside the canopy); place chairs/tables exactly here |
+| `queueSpots` | `Pt[][]` | per venue, 5 waiting spots 30 px behind the seats/slots |
 | `obstacleBuckets` | `Obstacle[][]` | the same obstacles bucketed on a 120 px hash (`bucketIndex(x, y)` from city.ts); use `obstacles` for placement |
-| `obstacles` | `Obstacle[]` | everything citizens cannot walk through: `{kind:'rect', tag, x,y,w,h}` or `{kind:'circle', tag, x,y,r, venue?, table?}` with `tag ∈ building|fountain|pond|tree|lamp|bench|planter|table|stall`. Props must be placed exactly at these (tree trunk r 4, lamp post r 3, bench 24×8, planter 24×12, table r 6, fountain basin r 33, pond ellipse approximated by r·0.85) |
+| `obstacles` | `Obstacle[]` | everything citizens cannot walk through: `{kind:'rect', tag, x,y,w,h, bench?}` or `{kind:'circle', tag, x,y,r, venue?, table?}` with `tag ∈ building|fountain|pond|tree|lamp|bench|planter|table|stall|awning`. `stall` = the whole market footprint (counter + canopy + 6 px margin, 122×50 from `terrace.y-36`); `awning` = each café canopy footprint (82×30). Props must be placed exactly at these (tree trunk r 4, lamp post r 3, bench 24×8 with `bench` = index, planter 24×12, table r 6, fountain basin r 33, pond ellipse approximated by r·0.85). Awnings/canopies should be modelled ≥ 1.35 × character height (city3d uses 68–70 units). |
 | `bar` | `Poi` | evening attractor (terrace of The Giant Fibre) |
 | `garbage`, `benches`, `fountain`, `pond`, `trees`, `lamps`, `planters`, `bikeracks` | `Poi[]` | props (`r` = canopy radius for trees, light radius for lamps) |
 | `plazaCenter`, `parkCenter` | `Pt` | |
@@ -128,12 +130,18 @@ Helpers: `walkable(city,x,y)`, `cellAt`, `inRect`, `findPath(city, from, to)` (`
 
 ## Collision guarantees (world.ts)
 
-- Citizen–citizen: hard circle separation (r 10) with yielding: the faster one takes the push,
-  standers hold, seated diners are immovable; walkers also sidestep people ahead of them.
+- Citizen–citizen: personal radius 14; hard minimum centre distance 22 px (bonded couples 16,
+  fighting pair a fixed 30) with yielding: the faster one takes the push, standers hold, seated
+  diners and sleepers are immovable; walkers also sidestep people ahead of them. Occupied seats
+  and beds are never contested (queue spots, one sleeper per bench); festival/bar spots are ≥ 26 px apart.
+- Nobody stands on a road cell: standing on one drifts to the nearest kerb; wander/bar/festival
+  targets are always off-road; a flee never ends its dash on the road.
 - Citizen–obstacle: after every step each citizen is clamped out of every `obstacle` (body r 8);
   a diner ignores only their own table, a market eater only the stall.
 - Path following re-plans when blocked for 1 s and gives up (stands) if blocked again within 4 s.
-- `src/world/collision.test.ts` asserts zero penetrations and no pair closer than 8 px over 2 game hours.
+- `src/world/collision.test.ts` asserts zero penetrations and no pair closer than 8 px over 2 game hours;
+  `src/world/crowding.test.ts` (24 citizens, evening) asserts nobody inside an obstacle rect, no two
+  stationary non-partners within 20 px, no stationary citizen on a road, no sleeper off a bed.
 
 ## Camera and selection (store, not world)
 

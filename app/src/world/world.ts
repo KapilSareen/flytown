@@ -8,7 +8,7 @@ import { NI, type InjectTarget, type InputChannel, type Sex } from '../brain/typ
 import { setWorldApi, useStore, type Action, type CitizenView, type WorldApi } from '../store';
 import { createAgent, updateBody, type Agent } from './agent';
 import { loadBrain, type Brain } from './brainAdapter';
-import { HASH_CELL, HASH_H, HASH_W, buildCity, bucketIndex, randomWalkable, rng, walkable, type City, type Pt } from './city';
+import { HASH_CELL, HASH_H, HASH_W, buildCity, bucketIndex, cellAt, offRoad, randomWalkable, rng, walkable, type City, type Pt } from './city';
 import { applyDriveProfile, updateDrives } from './drives';
 import { abortGoal, applyGoalProfile, riotChain, selectGoal, startGoal, thoughtOf, updateGoal } from './goals';
 import { findPath, lineOfSight } from './pathing';
@@ -55,6 +55,8 @@ export interface WorldState {
   /** True when the manifest's courtship readout is entirely male-only (silenced in female bodies). */
   femaleCourtshipSilenced: boolean;
   seatOwner: (number | null)[];            // occupant id per city.seats index
+  queueOwner: (number | null)[][];         // per venue: occupant id per city.queueSpots slot
+  benchOwner: (number | null)[];           // sleeper id per city.benches index
   perf: WorldPerf;
   hash: Agent[][];                         // citizens by 120 px bucket, rebuilt every step
   rand: () => number;
@@ -77,6 +79,8 @@ export async function startWorld(opts: { brain?: Brain; loop?: boolean; populati
     city, agents: [], brain: null, time: 0, hour: useStore.getState().timeOfDay, day: 1,
     daylight: daylightAt(useStore.getState().timeOfDay), fx: [], fps: 0, ready: false,
     femaleCourtshipSilenced: false, seatOwner: new Array<number | null>(city.seats.length).fill(null),
+    queueOwner: city.queueSpots.map(q => new Array<number | null>(q.length).fill(null)),
+    benchOwner: new Array<number | null>(city.benches.length).fill(null),
     perf: { senses: 0, brain: 0, goals: 0, move: 0, collision: 0, body: 0, stepTotal: 0, publish: 0, steps: 0, frameMs: 0, pathPlans: 0 },
     hash: Array.from({ length: HASH_W * HASH_H }, () => []),
     rand: rng(1234), inputsMap: new Map(),
@@ -114,16 +118,29 @@ export async function startWorld(opts: { brain?: Brain; loop?: boolean; populati
   return w;
 }
 
-/** The sidewalk spot in front of a random house: this citizen's home. */
+/** The doorstep of a random house: this citizen's home. Always a walkable spot clear of props; houses are handed out without repeats while they last. */
+const homesTaken = new Set<number>();
 function pickHome(w: WorldState): Pt {
-  const houses = w.city.buildings.filter(b => b.kind === 'house');
-  const h = houses[Math.floor(w.rand() * houses.length)];
-  const dir = h.door.y === h.y ? -1 : 1;                 // step outward from the door until walkable
-  for (let d = 12; d < 60; d += 6) {
-    const p = { x: h.door.x, y: h.door.y + dir * d };
-    if (walkable(w.city, p.x, p.y)) return p;
+  const all = w.city.buildings.map((b, i) => ({ b, i })).filter(x => x.b.kind === 'house');
+  let houses = all.filter(x => !homesTaken.has(x.i));
+  if (houses.length === 0) { homesTaken.clear(); houses = all; }
+  const start = Math.floor(w.rand() * houses.length);
+  for (let k = 0; k < houses.length; k++) {
+    const { b: h, i: hi } = houses[(start + k) % houses.length];
+    homesTaken.add(hi);
+    // outward normal of the door's edge
+    const nx = h.door.x === h.x ? -1 : h.door.x === h.x + h.w ? 1 : 0;
+    const ny = nx !== 0 ? 0 : h.door.y === h.y ? -1 : 1;
+    for (let d = 12; d < 56; d += 4) {
+      for (const side of [0, -8, 8, -16, 16]) {
+        const p = { x: h.door.x + nx * d + ny * side, y: h.door.y + ny * d + nx * side };
+        const c = cellAt(w.city, p.x, p.y);
+        if ((c === 1 || c === 3) && clearOfObstacles(w, p)) return p;
+      }
+    }
   }
-  return randomWalkable(w.city, w.rand, h.door, 60);
+  for (let i = 0; i < 50; i++) { const p = randomWalkable(w.city, w.rand, w.city.plazaCenter, 200); if (clearOfObstacles(w, p)) return p; }
+  return w.city.plazaCenter;
 }
 
 function spawn(w: WorldState, sex: Sex): Agent {
@@ -243,7 +260,7 @@ const ema = (prev: number, v: number, k: number) => prev + (v - prev) * k;
 // ---- spatial hash of citizens (120 px buckets) ----------------------------------------
 function rebuildHash(w: WorldState) {
   for (const b of w.hash) b.length = 0;
-  for (const a of w.agents) w.hash[bucketIndex(a.x, a.y)].push(a);
+  for (const a of w.agents) if (!a.indoors) w.hash[bucketIndex(a.x, a.y)].push(a);
 }
 const nearScratch: Agent[] = [];
 /** Citizens in the buckets covering the (x, y, r) disc. Returns a reused scratch array. */
@@ -303,7 +320,7 @@ export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
     a.action = action;
     a.actionT = w.time - a.actionSince;
     const g1 = now(); tGoals += g1 - g0;
-    moveAgent(w, a, dt);
+    if (a.indoors) { a.speed = 0; a.vx = a.vy = 0; a.x = a.home.x; a.y = a.home.y; } else moveAgent(w, a, dt);
     a.facing = a.face ? Math.atan2(a.face.y - a.y, a.face.x - a.x) : a.heading;
     a.speedNorm = clamp(Math.abs(a.speed) / WORLD.maxSpeed, 0, 2.5);
     if (a.godReceptive > 0 && w.time > a.godReceptive) a.godReceptive = 0;
@@ -344,12 +361,25 @@ function moveAgent(w: WorldState, a: Agent, dt: number) {
 
   switch (m.mode) {
     case 'stand': {
+      if (cellAt(w.city, a.x, a.y) === 2) {
+        // never stand on the road: drift to the nearest sidewalk point first
+        const p = offRoad(w.city, a);
+        desired = Math.atan2(p.y - a.y, p.x - a.x); steer = true; speed = WORLD.maxSpeed * 0.5;
+        break;
+      }
       if (a.face) { desired = Math.atan2(a.face.y - a.y, a.face.x - a.x); steer = true; }
       break;
     }
     case 'path': {
       const dTarget = dist(a, m.target);
-      if (dTarget <= m.arrive) { a.arrived = true; a.motion = { mode: 'stand' }; break; }
+      if (dTarget <= m.arrive) {
+        a.arrived = true; a.motion = { mode: 'stand' };
+        if (cellAt(w.city, a.x, a.y) === 2) {           // arrived on the road: keep walking to the kerb this very frame
+          const p = offRoad(w.city, a);
+          desired = Math.atan2(p.y - a.y, p.x - a.x); steer = true; speed = WORLD.maxSpeed * 0.5;
+        }
+        break;
+      }
       const wp = nextWaypoint(w, a, m.target);
       if (wp) {
         desired = Math.atan2(wp.y - a.y, wp.x - a.x);
@@ -404,7 +434,12 @@ function moveAgent(w: WorldState, a: Agent, dt: number) {
 
   const nx = a.x + Math.cos(a.heading) * speed * dt;
   const ny = a.y + Math.sin(a.heading) * speed * dt;
-  if (walkable(w.city, nx, ny)) { a.x = nx; a.y = ny; }
+  // the last steps onto an owned bench may enter its (blocked) cell; and a citizen already inside
+  // a blocked cell (pushed there by a crowd) may always step out of it — the continuous obstacle
+  // clamp, not the grid, is what keeps bodies out of props
+  const ontoBench = a.bench !== null && dist(a, w.city.benches[a.bench]) < 34;
+  const fromBlocked = !walkable(w.city, a.x, a.y);
+  if (ontoBench || fromBlocked || walkable(w.city, nx, ny)) { a.x = nx; a.y = ny; }
   else if (walkable(w.city, nx, a.y)) { a.x = nx; }
   else if (walkable(w.city, a.x, ny)) { a.y = ny; }
   a.x = clamp(a.x, 8, w.city.w - 8);
@@ -461,7 +496,15 @@ function sidestep(w: WorldState, a: Agent, desired: number): number {
   return clamp(turn, -0.8, 0.8);
 }
 
-const seated = (a: Agent) => a.seat !== null && a.motion.mode === 'stand';
+const seated = (a: Agent) => (a.seat !== null || a.action === 'sleep') && a.motion.mode === 'stand';   // diners and sleepers hold their spot
+
+export const SEP = { normal: 22, couple: 16, fighters: 30 };
+/** Minimum centre distance for a pair: 22 px, bonded couples 16, fighters a fixed 30. */
+function pairMin(a: Agent, b: Agent): number {
+  if (a.goal?.name === 'confront' && a.goal.partner === b.id) return SEP.fighters;
+  if (a.bondWith === b.id || (a.goal?.partner === b.id && (a.goal.name === 'bond' || a.goal.name === 'court' || a.goal.name === 'courted'))) return SEP.couple;
+  return SEP.normal;
+}
 
 /** Hard separation with yielding: walkers take the push, standers hold, seated diners are immovable. */
 function separate(w: WorldState) {
@@ -469,13 +512,14 @@ function separate(w: WorldState) {
   for (let iter = 0; iter < 2; iter++) {
     for (let i = 0; i < ag.length; i++) {
       const a = ag[i];
-      const cand = nearAgents(w, a.x, a.y, 24).slice();   // copy: the scratch is reused inside the loop
+      if (a.indoors) continue;
+      const cand = nearAgents(w, a.x, a.y, 32).slice();   // copy: the scratch is reused inside the loop
       for (const b of cand) {
         if (b.id <= a.id) continue;                        // each pair once
         let dx = b.x - a.x, dy = b.y - a.y;
         let d = Math.hypot(dx, dy);
         if (d < 1e-3) { dx = 1; dy = 0; d = 1; }
-        const min = a.radius + b.radius;
+        const min = pairMin(a, b);
         if (d >= min) continue;
         const overlap = min - d;
         const wa = seated(a) ? 0 : Math.abs(a.speed) + 0.1, wb = seated(b) ? 0 : Math.abs(b.speed) + 0.1;
@@ -486,14 +530,25 @@ function separate(w: WorldState) {
         b.x += ux * overlap * sb; b.y += uy * overlap * sb;
       }
     }
-    for (const a of ag) clampToObstacles(w, a);
+    for (const a of ag) if (!a.indoors) clampToObstacles(w, a);
   }
 }
 
 const BODY_R = 8;   // body radius against props (a little smaller than the citizen circle, so they can hug walls)
 
+/** True when a point is at least BODY_R + 2 from every obstacle (so a bed/spot there is never clamped). */
+function clearOfObstacles(w: WorldState, p: Pt): boolean {
+  const m = BODY_R + 2;
+  for (const o of w.city.obstacleBuckets[bucketIndex(p.x, p.y)]) {
+    if (o.kind === 'circle') { if (Math.hypot(p.x - o.x, p.y - o.y) < o.r + m) return false; }
+    else if (p.x > o.x - m && p.x < o.x + o.w + m && p.y > o.y - m && p.y < o.y + o.h + m) return false;
+  }
+  return true;
+}
+
 /** Push the citizen out of any obstacle it penetrates. Seated diners ignore their own table. */
 function clampToObstacles(w: WorldState, a: Agent) {
+  if (a.action === 'sleep' && a.bench !== null) return;     // pinned on their bench; nothing may nudge them
   const mySeat = a.seat !== null ? w.city.seats[a.seat] : null;
   for (const o of w.city.obstacleBuckets[bucketIndex(a.x, a.y)]) {
     if (o.kind === 'circle') {
@@ -505,7 +560,7 @@ function clampToObstacles(w: WorldState, a: Agent) {
       if (d < 1e-3) { a.x = o.x + min; continue; }
       a.x = o.x + dx / d * min; a.y = o.y + dy / d * min;
     } else {
-      if (o.tag === 'stall' && mySeat && mySeat.standing) continue;
+      if (o.tag === 'bench' && o.bench === a.bench) continue;      // a sleeper lies on their own bench
       const x0 = o.x - BODY_R, y0 = o.y - BODY_R, x1 = o.x + o.w + BODY_R, y1 = o.y + o.h + BODY_R;
       if (a.x <= x0 || a.x >= x1 || a.y <= y0 || a.y >= y1) continue;
       // smallest penetration axis
@@ -540,7 +595,7 @@ function publish(w: WorldState) {
     a.thought = thoughtOf(w, a);
     const d = a.drives, b = a.body;
     const key = `${Math.round(a.x)},${Math.round(a.y)},${r20(a.heading)},${a.action},${a.actionPhase},${a.goal?.name ?? 'idle'},${a.bondWith},${a.target},` +
-      `${r2(b.hunger)},${r2(b.dust)},${r2(b.energy)},${r2(b.injury)},${r20(a.speedNorm)},${r20(a.facing)},${Math.round(a.actionT * 4)},${a.thought},${selected},` +
+      `${r2(b.hunger)},${r2(b.dust)},${r2(b.energy)},${r2(b.injury)},${r20(a.speedNorm)},${r20(a.facing)},${Math.round(a.actionT * 4)},${a.thought},${selected},${a.indoors},` +
       `${r20(d.hunger)},${r20(d.cleanliness)},${r20(d.romance)},${r20(d.hostility)},${r20(d.fear)},${r20(d.fatigue)},${r20(d.social)}`;
     const c = viewCache.get(a.id);
     if (c && c.key === key && !selected) return c.view;
@@ -552,6 +607,7 @@ function publish(w: WorldState) {
       goal: a.goal?.name ?? 'idle',
       actionT: a.actionT, actionPhase: a.actionPhase, speedNorm: a.speedNorm, facing: a.facing,
       hunger: b.hunger, dust: b.dust, energy: b.energy, injury: b.injury,
+      indoors: a.indoors,
       bondWith: a.bondWith, target: a.target, inputs, outputs,
       drives: { ...d }, thought: a.thought, palette: a.palette,
     };
@@ -639,7 +695,7 @@ function registerApi(w: WorldState) {
         const a = get(id); if (!a) return;
         inject(a.id, { channel: 'sleep' }, 12, 8000); a.body.energy = Math.min(a.body.energy, 0.12);
         a.cooldown.godSleep = w.time + 30; a.cooldown.rest = 0; ring(a);
-        startGoal(w, a, 'rest', { forced: true, score: 1, spot: { x: a.x, y: a.y } });   // lies down right here
+        startGoal(w, a, 'rest', { forced: true, score: 1 });   // nearest free bench, else home: never on the pavement
         god(`You made ${a.name} drowsy.`, [a.id]);
       },
       riot(around, radius = 260) {
@@ -674,10 +730,7 @@ function registerApi(w: WorldState) {
           taken.add(best.id);
           for (const x of [m, best]) { x.bondWith = null; x.cooldown.court = 0; x.cooldown.courted = 0; inject(x.id, { channel: 'courtship' }, 10, 20000); ring(x); }
           if (w.rand() < 0.75) best.godReceptive = w.time + 60;      // most say yes, some turn him down
-          if (startGoal(w, m, 'court', { partner: best, forced: true, score: 1 })) {
-            m.goal!.forced = false; best.goal!.forced = false;        // evicted into courtship, but acceptance is hers
-            n++;
-          }
+          if (startGoal(w, m, 'court', { partner: best, forced: true, lottery: true, score: 1 })) n++;   // uninterruptible, but the answer is hers
         }
         god(`Love is in the air: ${n} suitors set off.`, []);
       },

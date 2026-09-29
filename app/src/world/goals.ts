@@ -5,7 +5,7 @@
 
 import { useStore, type Action, type EventKind } from '../store';
 import { clamp01, BODY, type Agent } from './agent';
-import { cellAt, randomWalkable, walkable, type Poi, type Pt } from './city';
+import { cellAt, offRoad, randomWalkable, walkable, type Poi, type Pt } from './city';
 import type { WorldState } from './world';
 
 export type GoalName = 'wander' | 'eatOut' | 'groom' | 'court' | 'courted' | 'bond' | 'confront' | 'flee' | 'rest' | 'chat' | 'bar' | 'festival';
@@ -19,7 +19,8 @@ export interface GoalState {
   score: number;
   partner: number | null;
   role: 'lead' | 'follow';
-  forced: boolean;              // started by a god action: never rejected / interrupted by drives
+  forced: boolean;              // started by a god action: never interrupted by drives
+  lottery?: boolean;            // forced courtship whose outcome is still hers (god.loveWave)
   // goal-specific
   poi?: Poi; poiIndex?: number; spot?: Pt; timeout?: number;
   blows?: number; maxBlows?: number; landsAt?: number; striker?: boolean; turnUntil?: number; speaking?: boolean;
@@ -88,6 +89,9 @@ export function abortGoal(w: WorldState, a: Agent) {
   if (!g) return;
   a.goal = null;
   if (a.seat !== null) { w.seatOwner[a.seat] = null; a.seat = null; }
+  releaseQueue(w, a);
+  if (a.bench !== null) { w.benchOwner[a.bench] = null; a.bench = null; }
+  a.bed = null; a.indoors = false;
   a.target = null; a.face = null;
   a.motion = { mode: 'stand' };
   if (g.partner !== null) {
@@ -97,7 +101,7 @@ export function abortGoal(w: WorldState, a: Agent) {
 }
 
 /** Start a goal (optionally paired). Returns false when a partner is required but unavailable. */
-export function startGoal(w: WorldState, a: Agent, name: GoalName, opts: { partner?: Agent; forced?: boolean; threat?: Pt; score?: number; spot?: Pt } = {}): boolean {
+export function startGoal(w: WorldState, a: Agent, name: GoalName, opts: { partner?: Agent; forced?: boolean; lottery?: boolean; threat?: Pt; score?: number; spot?: Pt } = {}): boolean {
   const p = opts.partner ?? null;
   const forced = opts.forced ?? false;
   if (p && !forced && !interruptible(p)) return false;
@@ -106,6 +110,7 @@ export function startGoal(w: WorldState, a: Agent, name: GoalName, opts: { partn
   const g = newState(w, name, opts.score ?? 0.5, p?.id ?? null, 'lead', forced);
   a.goal = g;
   a.target = p?.id ?? null;
+  if (opts.lottery) g.lottery = true;
   if (opts.threat) g.threat = opts.threat;
   if (opts.spot) g.spot = opts.spot;
   if (p) {
@@ -198,21 +203,29 @@ function init(w: WorldState, a: Agent) {
       const poi = w.city.food[idx];
       g.poi = poi; g.poiIndex = idx;
       const seat = claimSeat(w, a, idx, mateSeat);
-      a.seat = seat;
-      const s = w.city.seats[seat];
-      g.spot = { x: s.x, y: s.y };
-      g.phase = 'approach'; g.timeout = now + 45;
-      walkTo(a, g.spot, GOAL.pace.purpose, 4);
+      if (seat >= 0) {
+        a.seat = seat;
+        const s = w.city.seats[seat];
+        g.spot = { x: s.x, y: s.y };
+        g.phase = 'approach'; g.timeout = now + 45;
+        walkTo(a, g.spot, GOAL.pace.purpose, 4);
+      } else {
+        // every seat taken: wait at a queue spot (30 px behind), never push in
+        const q = claimQueue(w, a, idx);
+        g.spot = q ?? offRoad(w.city, randomWalkable(w.city, w.rand, poi, 70));
+        g.phase = 'queue'; g.timeout = now + 40;
+        walkTo(a, g.spot, GOAL.pace.purpose, 4);
+      }
       break;
     }
     case 'groom': {
       const bench = nearestBench(w, a, 150);
-      g.spot = bench ? { x: bench.x + (w.rand() < 0.5 ? -18 : 18), y: bench.y + 8 } : offRoadSpotNear(w, a, 30);
+      g.spot = offRoad(w.city, bench ? { x: bench.x + (w.rand() < 0.5 ? -20 : 20), y: bench.y + 10 } : offRoadSpotNear(w, a, 30));
       g.phase = 'aside'; g.timeout = now + 10;
       walkTo(a, g.spot, GOAL.pace.approach, 6);
       break;
     }
-    case 'court': g.phase = 'approach'; g.timeout = now + 25; break;
+    case 'court': g.phase = 'approach'; g.timeout = now + (g.forced ? 60 : 25); break;
     case 'courted': g.phase = 'wait'; stand(a); break;
     case 'bond': {
       const p = byId(w, g.partner);
@@ -244,12 +257,18 @@ function init(w: WorldState, a: Agent) {
       break;
     }
     case 'rest': {
-      const home = walkable(w.city, a.home.x, a.home.y) && dist(a, a.home) < 900 && w.rand() < 0.75;
-      const bench = nearestBench(w, a, 600);
-      g.spot = g.spot ?? (home ? a.home : bench ? { x: bench.x, y: bench.y + 8 } : at(a));
-      g.phase = 'goHome'; g.timeout = now + 50;
-      walkTo(a, g.spot, GOAL.pace.purpose, 6);
-      if (dist(a, g.spot) > 20) throttled(w, a, 'rest', 60, 'sleep', home ? `${a.name} heads home.` : `${a.name} heads for a bench.`, [a.id]);
+      // Bed: home (walk there, sleep inside) unless too tired to make it, then a free bench
+      // (one sleeper per bench, lying along it). Never the pavement.
+      const exhausted = a.body.energy < 0.15 || g.forced;
+      const bi = exhausted ? freeBench(w, a, 500) : -1;
+      if (bi >= 0) {
+        const b = w.city.benches[bi];
+        w.benchOwner[bi] = a.id; a.bench = bi; a.bed = 'bench';
+        g.spot = { x: b.x, y: b.y };
+      } else { a.bed = 'home'; g.spot = { x: a.home.x, y: a.home.y }; }
+      g.phase = 'goHome'; g.timeout = now + 60;
+      walkTo(a, g.spot, GOAL.pace.purpose, a.bed === 'bench' ? 3 : 6);
+      if (dist(a, g.spot) > 20) throttled(w, a, 'rest', 60, 'sleep', a.bed === 'home' ? `${a.name} heads home.` : `${a.name} heads for a bench.`, [a.id]);
       break;
     }
     case 'chat': {
@@ -261,13 +280,13 @@ function init(w: WorldState, a: Agent) {
       // loose clusters around the plaza: 4 cluster centres around the fountain
       const k = Math.floor(w.rand() * 4);
       const cx = w.city.plazaCenter.x + Math.cos(k * Math.PI / 2 + 0.4) * 95, cy = w.city.plazaCenter.y + Math.sin(k * Math.PI / 2 + 0.4) * 80;
-      g.spot = randomWalkable(w.city, w.rand, { x: cx, y: cy }, 40);
+      g.spot = spacedSpot(w, a, { x: cx, y: cy }, 45, 26, ['festival']);
       g.phase = 'approach'; g.timeout = now + 40; g.phaseUntil = now + GOAL.festivalSeconds;
       walkTo(a, g.spot, GOAL.pace.approach, 6);
       break;
     }
     case 'bar': {
-      g.spot = randomWalkable(w.city, w.rand, w.city.bar, 45);
+      g.spot = spacedSpot(w, a, w.city.bar, 50, 26, ['bar']);
       g.phase = 'approach'; g.timeout = now + 45; g.nextChatCheck = now + 4;
       walkTo(a, g.spot, GOAL.pace.approach, 6);
       throttled(w, a, 'bar', 120, 'info', `${a.name} heads to the bar.`, [a.id]);
@@ -310,6 +329,23 @@ export function updateGoal(w: WorldState, a: Agent, dt: number) {
     }
     case 'eatOut': {
       const poi = g.poi!;
+      if (g.phase === 'queue') {
+        pose(a, a.arrived ? 'idle' : 'walk', a.arrived ? 'queue' : 'approach');
+        if (a.arrived) stand(a, poi);
+        if (now > g.timeout!) { endGoal(w, a, 'eatOut', 15); break; }
+        if (Math.floor(now * 2) !== Math.floor((now - dt) * 2)) {       // poll twice a second
+          const seat = claimSeat(w, a, g.poiIndex!, null);
+          if (seat >= 0) {
+            releaseQueue(w, a);
+            a.seat = seat;
+            const s = w.city.seats[seat];
+            g.spot = { x: s.x, y: s.y };
+            g.phase = 'approach'; g.timeout = now + 30;
+            walkTo(a, g.spot, GOAL.pace.purpose, 4);
+          }
+        }
+        break;
+      }
       const seat = w.city.seats[a.seat ?? 0];
       const facePt = { x: seat.x + Math.cos(seat.facing) * 20, y: seat.y + Math.sin(seat.facing) * 20 };
       if (g.phase === 'approach') {
@@ -384,30 +420,17 @@ export function updateGoal(w: WorldState, a: Agent, dt: number) {
     case 'flee': {
       if (g.phase === 'dash') {
         pose(a, 'escape', now - g.startedAt < 0.12 ? 'crouch' : 'dash');
-        if (now >= g.phaseUntil) { g.phase = 'lookBack'; g.phaseUntil = now + GOAL.lookBackSeconds; stand(a, a.threat); }
+        if (now >= g.phaseUntil) {
+          if (cellAt(w.city, a.x, a.y) === 2 && now < g.startedAt + 5) { g.phaseUntil = now + 0.4; break; }   // don't stop on the road
+          g.phase = 'lookBack'; g.phaseUntil = now + GOAL.lookBackSeconds; stand(a, a.threat);
+        }
       } else {
         pose(a, 'idle', 'lookBack');
         if (now >= g.phaseUntil) { a.threat = null; a.threatId = null; a.fearFor = 0; endGoal(w, a, 'flee', GOAL.cooldown.flee); }
       }
       break;
     }
-    case 'rest': {
-      if (g.phase === 'goHome') {
-        pose(a, 'walk', 'approach');
-        if (a.arrived || now > g.timeout!) { g.phase = 'lie'; g.phaseUntil = now + GOAL.lieSeconds; stand(a); }
-      } else if (g.phase === 'lie') {
-        pose(a, 'sleep', 'lie');
-        if (now >= g.phaseUntil) { g.phase = 'sleep'; g.phaseUntil = now + 8; }
-      } else if (g.phase === 'sleep') {
-        pose(a, 'sleep', 'sleep');
-        const morning = w.daylight > 0.5 && !(a.cooldown.godSleep > now);
-        if (now >= g.phaseUntil && (a.body.energy > 0.8 || morning)) { g.phase = 'wake'; g.phaseUntil = now + GOAL.wakeSeconds; }
-      } else {
-        pose(a, 'sleep', 'wake');
-        if (now >= g.phaseUntil) endGoal(w, a, 'rest', GOAL.cooldown.rest);
-      }
-      break;
-    }
+    case 'rest': updateRest(w, a, g); break;
     case 'chat': {
       if (g.phase === 'approach') {
         if (g.role === 'lead') {
@@ -494,7 +517,7 @@ function updateCourt(w: WorldState, m: Agent, f: Agent | null, g: GoalState, dt:
       pose(m, 'sing', 'sing'); stand(m, f);
       if (dist(m, f) > 70) { g.phase = 'approach'; g.timeout = now + 10; fg.phase = 'wait'; break; }
       if (now >= g.phaseUntil) {
-        const accepted = g.forced || f.godReceptive > now || f.drives.romance > GOAL.receptive;
+        const accepted = (g.forced && !g.lottery) || f.godReceptive > now || f.drives.romance > GOAL.receptive;
         if (accepted) {
           g.phase = 'dance'; g.phaseUntil = now + GOAL.danceSeconds; fg.phase = 'dance';
           m.motion = { mode: 'orbit', center: at(f), radius: 28, angle: Math.atan2(m.y - f.y, m.x - f.x), pace: 0.5 };
@@ -524,6 +547,79 @@ function updateCourt(w: WorldState, m: Agent, f: Agent | null, g: GoalState, dt:
       break;
     }
   }
+}
+
+function updateRest(w: WorldState, a: Agent, g: GoalState) {
+  const now = w.time;
+  const onBench = a.bed === 'bench';
+  const bench = a.bench !== null ? w.city.benches[a.bench] : null;
+  const axis = bench ? benchAxis(w.city, bench) : 0;
+  const morning = w.daylight > 0.5 && !(a.cooldown.godSleep > now);
+  // a sleeper stays exactly on the bench (or the doorstep) whatever the crowd does around them
+  const pin = () => { if (bench) { a.x = bench.x; a.y = bench.y; a.heading = axis; } else { a.x = a.home.x; a.y = a.home.y; } };
+  switch (g.phase) {
+    case 'goHome':
+      pose(a, 'walk', 'approach');
+      if (a.arrived) {
+        if (onBench && bench) { a.x = bench.x; a.y = bench.y; g.phase = 'align'; g.phaseUntil = now + 2; stand(a, { x: bench.x + Math.cos(axis) * 30, y: bench.y + Math.sin(axis) * 30 }); }
+        else { a.x = a.home.x; a.y = a.home.y; g.phase = 'enter'; g.phaseUntil = now + 0.8; stand(a); }
+      } else if (now > g.timeout!) {
+        if (onBench) { // could not reach the bench: give it up and walk home instead
+          if (a.bench !== null) { w.benchOwner[a.bench] = null; a.bench = null; }
+          a.bed = 'home'; g.spot = { x: a.home.x, y: a.home.y }; g.timeout = now + 60;
+          walkTo(a, g.spot, GOAL.pace.purpose, 6);
+        } else { a.x = a.home.x; a.y = a.home.y; g.phase = 'enter'; g.phaseUntil = now + 0.8; stand(a); }
+      }
+      break;
+    case 'align': {   // turn to lie along the bench before lying down
+      pose(a, 'idle', 'align');
+      const diff = Math.atan2(Math.sin(axis - a.heading), Math.cos(axis - a.heading));
+      if (Math.abs(diff) < 0.25 || now >= g.phaseUntil) { a.heading = axis; a.face = null; g.phase = 'lie'; g.phaseUntil = now + GOAL.lieSeconds; }
+      break;
+    }
+    case 'enter':      // steps inside; renderers fade the figure out
+      pose(a, 'idle', 'enter'); stand(a);
+      if (now >= g.phaseUntil) { a.indoors = true; g.phase = 'sleep'; g.phaseUntil = now + 8; }
+      break;
+    case 'lie':
+      pose(a, 'sleep', 'lie'); stand(a); pin();
+      if (now >= g.phaseUntil) { g.phase = 'sleep'; g.phaseUntil = now + 8; }
+      break;
+    case 'sleep':
+      pose(a, 'sleep', 'sleep'); stand(a); pin();
+      if (now >= g.phaseUntil && (a.body.energy > 0.8 || morning)) {
+        if (a.indoors) { a.indoors = false; g.phase = 'exit'; g.phaseUntil = now + 0.8; }
+        else { g.phase = 'wake'; g.phaseUntil = now + GOAL.wakeSeconds; }
+      }
+      break;
+    case 'exit':       // reappears at the door
+      pose(a, 'idle', 'exit'); stand(a);
+      if (now >= g.phaseUntil) { g.phase = 'stretch'; g.phaseUntil = now + GOAL.wakeSeconds; }
+      break;
+    case 'wake':       // still lying, stirring
+      pose(a, 'sleep', 'wake'); stand(a); pin();
+      if (now >= g.phaseUntil) { g.phase = 'standUp'; g.phaseUntil = now + 1; }
+      break;
+    case 'standUp':    // sits up and stands before walking anywhere
+      pose(a, 'idle', 'standUp'); stand(a);
+      if (now >= g.phaseUntil) endGoal(w, a, 'rest', GOAL.cooldown.rest);
+      break;
+    case 'stretch':
+      pose(a, 'idle', 'stretch'); stand(a);
+      if (now >= g.phaseUntil) endGoal(w, a, 'rest', GOAL.cooldown.rest);
+      break;
+  }
+}
+
+/** Direction a bench's long axis runs (benches face the nearer of plaza/park centre; matches city3d). */
+export function benchAxis(city: WorldState['city'], b: Poi): number {
+  const cx = Math.abs(b.x - city.plazaCenter.x) < Math.abs(b.x - city.parkCenter.x) ? city.plazaCenter : city.parkCenter;
+  return Math.atan2(cx.y - b.y, cx.x - b.x) + Math.PI / 2;
+}
+function freeBench(w: WorldState, p: Pt, r: number): number {
+  let best = -1, bd = r;
+  w.city.benches.forEach((b, i) => { if (w.benchOwner[i] !== null) return; const d = dist(b, p); if (d < bd) { bd = d; best = i; } });
+  return best;
 }
 
 function updateConfront(w: WorldState, a: Agent, b: Agent, g: GoalState) {
@@ -608,24 +704,37 @@ function updateConfront(w: WorldState, a: Agent, b: Agent, g: GoalState) {
 }
 
 // ---- helpers ------------------------------------------------------------------------------
-/** Claim a free seat at venue `venue`; next to `nearSeat` (a partner's chair) when possible. */
+/** Claim a free seat at venue `venue` (next to `nearSeat`, a partner's chair, when possible); -1 when full. */
 function claimSeat(w: WorldState, a: Agent, venue: number, nearSeat: number | null): number {
   const seats = w.city.seats;
-  const free = (i: number) => w.seatOwner[i] === null;
   let best = -1, bd = Infinity;
   for (let i = 0; i < seats.length; i++) {
-    if (seats[i].venue !== venue) continue;
-    if (!free(i)) continue;
+    if (seats[i].venue !== venue || w.seatOwner[i] !== null) continue;
     // same table as the partner beats everything; otherwise nearest free chair
     const d = nearSeat !== null && seats[i].table === seats[nearSeat].table ? -1 : dist(seats[i], a);
     if (d < bd) { bd = d; best = i; }
   }
-  if (best < 0) { // full: share a random chair rather than give up on the meal
-    const all = seats.map((s, i) => (s.venue === venue ? i : -1)).filter(i => i >= 0);
-    best = all[Math.floor(w.rand() * all.length)];
-  }
-  w.seatOwner[best] = a.id;
+  if (best >= 0) w.seatOwner[best] = a.id;
   return best;
+}
+function claimQueue(w: WorldState, a: Agent, venue: number): Pt | null {
+  const owners = w.queueOwner[venue];
+  for (let i = 0; i < owners.length; i++) if (owners[i] === null) { owners[i] = a.id; return w.city.queueSpots[venue][i]; }
+  return null;
+}
+function releaseQueue(w: WorldState, a: Agent) {
+  for (const owners of w.queueOwner) for (let i = 0; i < owners.length; i++) if (owners[i] === a.id) owners[i] = null;
+}
+
+/** A spot near `center` at least `gap` px from every other citizen's chosen crowd spot. */
+function spacedSpot(w: WorldState, a: Agent, center: Pt, radius: number, gap: number, names: GoalName[]): Pt {
+  const taken: Pt[] = [];
+  for (const o of w.agents) if (o !== a && o.goal && names.includes(o.goal.name) && o.goal.spot) taken.push(o.goal.spot);
+  for (let i = 0; i < 40; i++) {
+    const p = offRoad(w.city, randomWalkable(w.city, w.rand, center, radius));
+    if (taken.every(t => dist(t, p) >= gap)) return p;
+  }
+  return offRoad(w.city, randomWalkable(w.city, w.rand, center, radius * 1.5));
 }
 
 function leaveVenue(w: WorldState, a: Agent, g: GoalState, poi: Poi) {
@@ -682,14 +791,14 @@ export function thoughtOf(w: WorldState, a: Agent): string {
   if (!g) return 'Deciding what to do.';
   switch (g.name) {
     case 'wander': return a.bondWith !== null ? `Strolling with ${byId(w, a.bondWith)?.name ?? 'someone'}.` : g.phase === 'lookAround' ? 'Looking around.' : d.hunger > 0.3 ? 'Strolling, getting a little hungry.' : 'Strolling around town.';
-    case 'eatOut': return g.phase === 'approach' ? `Hungry — heading to ${g.poi?.name}.` : g.phase === 'eat' ? `Eating at ${g.poi?.name}.` : g.phase === 'leave' ? 'That was good.' : `Sitting at ${g.poi?.name}.`;
+    case 'eatOut': return g.phase === 'queue' ? `Waiting for a table at ${g.poi?.name}.` : g.phase === 'approach' ? `Hungry — heading to ${g.poi?.name}.` : g.phase === 'eat' ? `Eating at ${g.poi?.name}.` : g.phase === 'leave' ? 'That was good.' : `Sitting at ${g.poi?.name}.`;
     case 'groom': return g.phase === 'groom' ? 'Dusty antennae — cleaning up.' : 'Stepping aside to clean up.';
     case 'court': return g.phase === 'approach' ? `${p?.name} smells wonderful. Going over.` : g.phase === 'sing' ? `Singing to ${p?.name}… ${(p?.drives.romance ?? 0) > GOAL.receptive || g.forced ? "she's listening." : "she's not into it."}` : g.phase === 'dance' ? `Dancing with ${p?.name}!` : `${g.phase === 'turnedDown' ? 'Turned down. Ouch.' : ''}`;
     case 'courted': return g.phase === 'listen' ? (d.romance > GOAL.receptive ? `${p?.name} sings nicely.` : `${p?.name} is singing at me. Hm.`) : g.phase === 'dance' ? `Dancing with ${p?.name}!` : `${p?.name} is coming over.`;
     case 'bond': return g.phase === 'together' ? `Walking with ${p?.name}.` : `Sitting with ${p?.name}. Happy.`;
     case 'confront': return g.phase === 'strut' ? 'Won that one.' : g.phase === 'approach' ? `Squaring up to ${p?.name}.` : g.phase === 'stare' ? `Staring down ${p?.name}.` : `Fighting ${p?.name}!`;
     case 'flee': return g.phase === 'dash' ? 'Get away!' : 'Is it gone?';
-    case 'rest': return g.phase === 'goHome' ? (dist(g.spot ?? a, a.home) < 5 ? 'Tired — heading home.' : 'Tired — finding a bench.') : g.phase === 'sleep' ? 'Zzz.' : g.phase === 'wake' ? 'Stretching.' : 'Lying down.';
+    case 'rest': return g.phase === 'goHome' ? (a.bed === 'home' ? 'Tired — heading home.' : 'Tired — finding a bench.') : g.phase === 'sleep' ? 'Zzz.' : g.phase === 'wake' || g.phase === 'stretch' || g.phase === 'standUp' ? 'Stretching.' : g.phase === 'enter' ? 'Home at last.' : 'Lying down.';
     case 'chat': return g.phase === 'talk' ? (g.speaking ? `Telling ${p?.name} about my day.` : `Listening to ${p?.name}.`) : `Going to say hi to ${p?.name}.`;
     case 'bar': return g.phase === 'hangOut' ? 'Evening at the bar.' : 'Heading to the bar.';
     case 'festival': return g.phase === 'approach' ? 'A festival! Heading to the plaza.' : g.speaking ? 'Chatting at the festival.' : g.striker ? 'Singing along.' : 'Dancing!';

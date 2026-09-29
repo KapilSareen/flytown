@@ -43,9 +43,9 @@ export interface Seat extends Pt {
 
 /** Continuous obstacle used for the per-step position clamp (and to block the grid). */
 export type Obstacle =
-  | { kind: 'rect'; tag: ObstacleTag; x: number; y: number; w: number; h: number }
+  | { kind: 'rect'; tag: ObstacleTag; x: number; y: number; w: number; h: number; bench?: number }
   | { kind: 'circle'; tag: ObstacleTag; x: number; y: number; r: number; venue?: number; table?: number };
-export type ObstacleTag = 'building' | 'fountain' | 'pond' | 'tree' | 'lamp' | 'bench' | 'planter' | 'table' | 'stall';
+export type ObstacleTag = 'building' | 'fountain' | 'pond' | 'tree' | 'lamp' | 'bench' | 'planter' | 'table' | 'stall' | 'awning';
 
 export interface Block extends Rect {
   col: number; row: number;
@@ -64,6 +64,7 @@ export interface City {
   pois: Poi[];
   food: Poi[];          // cafés + market (odorFood emitters, sugar taste on tile)
   seats: Seat[];        // terrace chairs / stall slots, grouped by venue (index into food)
+  queueSpots: Pt[][];   // per venue: where to wait (30 px behind the seats) when every seat is taken
   obstacles: Obstacle[]; // everything a citizen cannot walk through (see docs/RENDER_API.md)
   obstacleBuckets: Obstacle[][];   // obstacles by HASH_CELL bucket (see bucketIndex), for O(1) clamps
   garbage: Poi[];
@@ -167,22 +168,31 @@ export function buildCity(seed = 7): City {
   ];
   const bar = addPoi({ ...barV.terrace, kind: 'bar', r: 60, name: barV.bld.name });
 
-  // Seats. Cafés: three terrace tables (as drawn), two chairs each, facing the table.
-  // Market: five standing slots in front of the stall, facing it.
+  // Seats. Cafés: three terrace tables outside the awning, two chairs each (14 px from the
+  // table, adjacent chairs >= 26 px apart), facing the table. Market: five standing slots in
+  // front of the counter, outside the canopy, 28 px apart. Queue spots sit 30 px further back.
   const seats: Seat[] = [];
+  const queueSpots: Pt[][] = [[], [], []];
   const tableSeats = (venue: number, terrace: Pt, side: 'n' | 's' | 'e' | 'w') => {
     const horiz = side === 'n' || side === 's';
-    const tables: Pt[] = ([[-36, 0], [0, 8], [36, 0]] as const).map(([ox, oy]) => horiz ? { x: terrace.x + ox, y: terrace.y + oy } : { x: terrace.x + oy, y: terrace.y + ox });
+    const back = side === 'n' ? -1 : side === 's' ? 1 : side === 'w' ? -1 : 1;     // away from the wall
+    const tables: Pt[] = ([[-54, 0], [0, 6], [54, 0]] as const).map(([ox, oy]) => horiz ? { x: terrace.x + ox, y: terrace.y + oy } : { x: terrace.x + oy, y: terrace.y + ox });
     tables.forEach((t, ti) => {
-      const offs = horiz ? [[-12, 0], [12, 0]] : [[0, -12], [0, 12]];
+      const offs = horiz ? [[-14, 0], [14, 0]] : [[0, -14], [0, 14]];
       for (const [ox, oy] of offs) seats.push({ x: t.x + ox, y: t.y + oy, venue, table: ti, facing: Math.atan2(-oy, -ox), standing: false });
     });
+    for (let i = 0; i < 5; i++) {
+      const along = -56 + i * 28;
+      queueSpots[venue].push(horiz ? { x: terrace.x + along, y: terrace.y + back * 36 } : { x: terrace.x + back * 36, y: terrace.y + along });
+    }
   };
   tableSeats(0, cafeA.terrace, 's');
   tableSeats(1, cafeB.terrace, 'n');
+  // market (door side 's'): canopy covers door.y-2 .. terrace.y+14; counter at its front edge
   for (let i = 0; i < 5; i++) {
-    const x = market.terrace.x - 44 + i * 22, y = market.terrace.y + 14;
-    seats.push({ x, y, venue: 2, table: 0, facing: -Math.PI / 2, standing: true });
+    const x = market.terrace.x - 56 + i * 28;
+    seats.push({ x, y: market.terrace.y + 30, venue: 2, table: 0, facing: -Math.PI / 2, standing: true });
+    queueSpots[2].push({ x, y: market.terrace.y + 60 });
   }
 
   // Garbage corner: NE block, in the corner of the sidewalk.
@@ -278,11 +288,16 @@ export function buildCity(seed = 7): City {
           const kind: BuildingKind = rand() < 0.2 ? 'shop' : 'house';
           const rr = rand();
           const roof: RoofKind = kind === 'shop' ? 'shop' : rr < 0.4 ? 'terracotta' : rr < 0.7 ? 'flat' : rr < 0.85 ? 'green' : 'glass';
+          // the door faces the block's outer sidewalk (nearest edge), never an inner alley
+          const dl = cand.x - b.x, dr = b.x + b.w - (cand.x + cand.w), dt = cand.y - b.y, db = b.y + b.h - (cand.y + cand.h);
+          const m = Math.min(dl, dr, dt, db);
+          const door: Pt = m === dt ? { x: cand.x + cand.w / 2, y: cand.y } : m === db ? { x: cand.x + cand.w / 2, y: cand.y + cand.h }
+            : m === dl ? { x: cand.x, y: cand.y + cand.h / 2 } : { x: cand.x + cand.w, y: cand.y + cand.h / 2 };
           buildings.push({
             ...cand, kind, roof,
             color: PALETTE_WALLS[Math.floor(rand() * PALETTE_WALLS.length)],
             floors,
-            door: { x: cand.x + cand.w / 2, y: ci === 0 ? cand.y + cand.h : cand.y },
+            door,
           });
         }
         y += hh + gap;
@@ -298,7 +313,7 @@ export function buildCity(seed = 7): City {
   obstacles.push({ kind: 'circle', tag: 'pond', x: pond.x, y: pond.y, r: pond.r * 0.85 });
   for (const t of trees) obstacles.push({ kind: 'circle', tag: 'tree', x: t.x, y: t.y, r: 4 });
   for (const l of lamps) obstacles.push({ kind: 'circle', tag: 'lamp', x: l.x, y: l.y, r: 3 });
-  for (const b of benches) obstacles.push({ kind: 'rect', tag: 'bench', x: b.x - 12, y: b.y - 4, w: 24, h: 8 });
+  benches.forEach((b, i) => obstacles.push({ kind: 'rect', tag: 'bench', x: b.x - 12, y: b.y - 4, w: 24, h: 8, bench: i }));
   for (const p of planters) obstacles.push({ kind: 'rect', tag: 'planter', x: p.x - 12, y: p.y - 6, w: 24, h: 12 });
   const tableSet = new Set<string>();
   for (const s of seats) {
@@ -306,10 +321,14 @@ export function buildCity(seed = 7): City {
     const key = `${s.venue}:${s.table}`;
     if (tableSet.has(key)) continue;
     tableSet.add(key);
-    const tx = s.x + Math.cos(s.facing) * 12, ty = s.y + Math.sin(s.facing) * 12;   // the table is 12 px in front of the chair
+    const tx = s.x + Math.cos(s.facing) * 14, ty = s.y + Math.sin(s.facing) * 14;   // the table is 14 px in front of the chair
     obstacles.push({ kind: 'circle', tag: 'table', x: tx, y: ty, r: 6, venue: s.venue, table: s.table });
   }
-  obstacles.push({ kind: 'rect', tag: 'stall', x: market.terrace.x - 52, y: market.terrace.y - 10, w: 104, h: 14 });
+  // Market stall + canopy: one footprint (awning included, 6 px margin). Café awnings likewise,
+  // so nobody stands under a canopy; chairs/slots are outside these rects.
+  obstacles.push({ kind: 'rect', tag: 'stall', x: market.terrace.x - 61, y: market.terrace.y - 36, w: 122, h: 50 });
+  obstacles.push({ kind: 'rect', tag: 'awning', x: cafeA.terrace.x - 41, y: cafeA.terrace.y - 40, w: 82, h: 30 });   // door.y-6 .. door.y+24
+  obstacles.push({ kind: 'rect', tag: 'awning', x: cafeB.terrace.x - 41, y: cafeB.terrace.y + 10, w: 82, h: 30 });   // door.y-24 .. door.y+6
 
   // Walkability grid.
   const grid = new Uint8Array(GRID_W * GRID_H);
@@ -355,7 +374,7 @@ export function buildCity(seed = 7): City {
 
   return {
     w: WORLD_W, h: WORLD_H, margin, roadW, sidewalkW,
-    blocks, roadsH, roadsV, buildings, pois, food, seats, obstacles, obstacleBuckets, garbage, benches, lamps, trees, bar, fountain, pond, planters, bikeracks,
+    blocks, roadsH, roadsV, buildings, pois, food, seats, queueSpots, obstacles, obstacleBuckets, garbage, benches, lamps, trees, bar, fountain, pond, planters, bikeracks,
     plazaCenter, parkCenter, grid,
   };
 }
@@ -380,6 +399,28 @@ export const cellAt = (city: City, x: number, y: number): number => {
   return city.grid[gy * GRID_W + gx];
 };
 export const walkable = (city: City, x: number, y: number) => cellAt(city, x, y) !== 0;
+
+/** Nearest sidewalk/park point to `p` (itself if already off the road); never a road or blocked cell. */
+export function offRoad(city: City, p: Pt): Pt {
+  const c = cellAt(city, p.x, p.y);
+  if (c === 1 || c === 3) return p;
+  const gx0 = Math.floor(p.x / CELL), gy0 = Math.floor(p.y / CELL);
+  for (let r = 1; r < 12; r++) {
+    let best: Pt | null = null, bd = Infinity;
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+      const gx = gx0 + dx, gy = gy0 + dy;
+      if (gx < 0 || gy < 0 || gx >= GRID_W || gy >= GRID_H) continue;
+      const v = city.grid[gy * GRID_W + gx];
+      if (v !== 1 && v !== 3) continue;
+      const q = { x: gx * CELL + CELL / 2, y: gy * CELL + CELL / 2 };
+      const d = Math.hypot(q.x - p.x, q.y - p.y);
+      if (d < bd) { bd = d; best = q; }
+    }
+    if (best) return best;
+  }
+  return city.plazaCenter;
+}
 
 /** Random walkable point, optionally near a centre. */
 export function randomWalkable(city: City, rand: () => number, near?: Pt, radius = 200): Pt {

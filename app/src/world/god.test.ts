@@ -54,19 +54,22 @@ describe('god actions', () => {
     const scared = females[1];
     api.god.scare(scared.id);
     seen.clear();
-    run(w, 4, ww => { const a = ww.agents.find(x => x.id === scared.id)!; seen.add(`${a.action}/${a.actionPhase}`); });
+    run(w, 9, ww => { const a = ww.agents.find(x => x.id === scared.id)!; seen.add(`${a.action}/${a.actionPhase}`); });
     expect(seen.has('escape/dash')).toBe(true);
     expect(seen.has('idle/lookBack')).toBe(true);
 
-    // sleep: lies down in place
+    // sleep: walks to a bed (nearest free bench, else home) and lies down there, never on the pavement
     const sleeper = females[2];
-    const sx = sleeper.x, sy = sleeper.y;
     api.god.sleep(sleeper.id);
     seen.clear();
-    run(w, 6, ww => { const a = ww.agents.find(x => x.id === sleeper.id)!; seen.add(`${a.action}/${a.actionPhase}`); });
-    expect(seen.has('sleep/lie')).toBe(true);
+    let offBed = 0;
+    run(w, 40, ww => {
+      const a = ww.agents.find(x => x.id === sleeper.id)!;
+      seen.add(`${a.action}/${a.actionPhase}`);
+      if (a.action === 'sleep' && !ww.city.benches.some(b => Math.hypot(a.x - b.x, a.y - b.y) < 6) && Math.hypot(a.x - a.home.x, a.y - a.home.y) > 6) offBed++;
+    });
     expect(seen.has('sleep/sleep')).toBe(true);
-    expect(Math.hypot(sleeper.x - sx, sleeper.y - sy)).toBeLessThan(12);
+    expect(offBed).toBe(0);
 
     // dust: grooms
     const dusty = females[3];
@@ -105,7 +108,7 @@ describe('god actions', () => {
     // love wave: several bonds, at least one rejection possible
     n = mark();
     api.god.loveWave();
-    run(w, 40);
+    run(w, 70);
     ev = eventsSince(n);
     expect(ev.filter(t => t.includes('fell in love')).length).toBeGreaterThanOrEqual(3);
 

@@ -55,7 +55,7 @@ export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new
   let loomThreat: Agent | null = null;
   const others = ctx.near ? ctx.near(a.x, a.y, SENSE.objectRange) : ctx.agents;
   for (const o of others) {
-    if (o === a) continue;
+    if (o === a || o.indoors) continue;
     const dx = o.x - a.x, dy = o.y - a.y;
     const d = Math.hypot(dx, dy) || 1e-3;
     if (d > SENSE.objectRange) continue;

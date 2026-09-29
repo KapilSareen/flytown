@@ -69,6 +69,9 @@ export interface Agent {
   singHeardUntil: number;       // soundSong input while > now
   singFrom: number | null;
   seat: number | null;          // index into city.seats while eating
+  bed: 'home' | 'bench' | null; // where the current rest happens
+  bench: number | null;         // index into city.benches while resting on one
+  indoors: boolean;             // asleep inside their house (renderers hide them; senses ignore them)
   lastEventAt: Record<string, number>;
 
   palette: { skin: string; hair: string; top: string; bottom: string };
@@ -117,7 +120,7 @@ export function createAgent(id: number, sex: Sex, pos: Pt, home: Pt, rand: () =>
   const heading = rand() * Math.PI * 2;
   return {
     id, name: nextName(sex, rand), sex, seed: Math.floor(rand() * 1e9),
-    x: pos.x, y: pos.y, heading, speed: 0, vx: 0, vy: 0, radius: 10, turnBias: 0, home,
+    x: pos.x, y: pos.y, heading, speed: 0, vx: 0, vy: 0, radius: 14, turnBias: 0, home,
     body: { hunger: 0.1 + rand() * 0.6, dust: rand() * 0.3, energy: 0.5 + rand() * 0.5, injury: 0 },
     inputs: new Float32Array(NI), outputs: new Float32Array(NO),
     drives: { hunger: 0, cleanliness: 0, romance: 0, hostility: 0, fear: 0, fatigue: 0, social: 0, wander: 0.3 },
@@ -126,7 +129,7 @@ export function createAgent(id: number, sex: Sex, pos: Pt, home: Pt, rand: () =>
     path: null, pathIdx: 0, pathTarget: null, stuckFor: 0, px: pos.x, py: pos.y, cooldown: {},
     action: 'idle', actionSince: now, actionT: 0, actionPhase: 'idle', speedNorm: 0, facing: heading,
     target: null, bondWith: null, bondUntil: 0, threat: null, hurtUntil: 0, godReceptive: 0, riotUntil: 0, provoked: 0, loomFor: 0, fearFor: 0, threatId: null, godFeedUntil: 0,
-    singHeardUntil: 0, singFrom: null, seat: null, lastEventAt: {},
+    singHeardUntil: 0, singFrom: null, seat: null, bed: null, bench: null, indoors: false, lastEventAt: {},
     palette: { ...pick(rand, PALETTES) },
     hairStyle: pick(rand, HAIR_STYLES[sex]),
     thought: '',

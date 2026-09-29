@@ -547,7 +547,8 @@ function buildCafe(b: Building, city: City, flat: GeoBuilder, facet: GeoBuilder,
   const horizontal = s === 'n' || s === 's';
   const out = s === 'n' ? -1 : s === 's' ? 1 : s === 'w' ? -1 : 1;
   const ax = horizontal ? b.door.x : b.door.x + out * 9, az = horizontal ? b.door.y + out * 9 : b.door.y;
-  awning.add(G.box, 0xffffff, ax, 33, az, horizontal ? [out * 0.35, 0, 0] : [0, 0, -out * 0.35], horizontal ? [70, 1.2, 20] : [20, 1.2, 70]);
+  // awnings sit at 70 units, above 1.35 x character height (~50), so nothing clips under them
+  awning.add(G.box, 0xffffff, ax, 70, az, horizontal ? [out * 0.35, 0, 0] : [0, 0, -out * 0.35], horizontal ? [82, 1.2, 24] : [24, 1.2, 82]);
   if (!t) return;
   // chairs exactly on the world's seats (facing their table); one table + parasol per pair
   const venue = city.food.findIndex(f => f.name === b.name);
@@ -555,7 +556,7 @@ function buildCafe(b: Building, city: City, flat: GeoBuilder, facet: GeoBuilder,
   for (const seat of city.seats) {
     if (seat.venue !== venue || seat.standing) continue;
     chairAt(flat, seat.x, seat.y, seat.facing);
-    if (!tables.has(seat.table)) tables.set(seat.table, { x: seat.x + Math.cos(seat.facing) * 12, y: seat.y + Math.sin(seat.facing) * 12 });
+    if (!tables.has(seat.table)) tables.set(seat.table, { x: seat.x + Math.cos(seat.facing) * 14, y: seat.y + Math.sin(seat.facing) * 14 });
   }
   for (const [ti, tp] of tables) {
     tableAt(flat, tp.x, tp.y, ti);
@@ -573,21 +574,24 @@ function buildMarket(b: Building, city: City, flat: GeoBuilder, awning: GeoBuild
   const horizontal = s === 'n' || s === 's';
   const out = s === 'n' ? -1 : s === 's' ? 1 : s === 'w' ? -1 : 1;
   const ax = horizontal ? b.door.x : b.door.x + out * 12, az = horizontal ? b.door.y + out * 12 : b.door.y;
-  awning.add(G.box, 0xffffff, ax, 34, az, horizontal ? [out * 0.3, 0, 0] : [0, 0, -out * 0.3], horizontal ? [110, 1.2, 26] : [26, 1.2, 110]);
+  awning.add(G.box, 0xffffff, ax, 70, az, horizontal ? [out * 0.3, 0, 0] : [0, 0, -out * 0.3], horizontal ? [122, 1.2, 28] : [28, 1.2, 122]);
   if (!t) return;
-  // the produce stall: the world's obstacle rect (terrace.x - 52, terrace.y - 10, 104 x 14);
-  // standing slots are 14 px south of the terrace point, facing north into the stall
-  const sx = t.x, sz = t.y - 3;
-  box(flat, 0x8f6a42, sx, 2, sz, 104, 10, 14);                              // counter
-  box(flat, 0xb08a5c, sx, 12, sz, 106, 1.2, 16);                            // counter top
+  // the produce stall: the world's obstacle rect is (terrace.x - 61, terrace.y - 36, 122 x 50), canopy
+  // included; the counter is a visible box at its FRONT edge and the standing slots are 30 px
+  // south of the terrace point, facing north into the counter
+  const sx = t.x, sz = t.y + 6;
+  box(flat, 0x8f6a42, sx, 2, sz, 108, 14, 16);                              // counter (front of the stall)
+  box(flat, 0xb08a5c, sx, 16, sz, 112, 1.6, 20);                            // counter top
+  box(flat, 0x6f5236, sx, 2, sz + 8.5, 108, 4, 1.5);                        // front kick board
   const fruit = [0xd8402c, 0xe9a23b, 0x7fb04a, 0xf0c24a, 0x8e44ad, 0xd8402c, 0x5fae5a, 0xe9a23b];
   for (let i = 0; i < 8; i++) {
     const cx = sx - 45 + i * 13, cz = sz - 1;
-    box(flat, 0x9a7548, cx, 13.2, cz, 10, 3, 8);                            // crate
-    for (let k = 0; k < 4; k++) flat.add(G.sphere, fruit[i], cx - 2.5 + (k % 2) * 5, 16.8, cz - 1.5 + Math.floor(k / 2) * 3, [0, 0, 0], [1.5, 1.5, 1.5]);
+    box(flat, 0x9a7548, cx, 18.2, cz, 10, 3, 8);                            // crate
+    for (let k = 0; k < 4; k++) flat.add(G.sphere, fruit[i], cx - 2.5 + (k % 2) * 5, 21.8, cz - 1.5 + Math.floor(k / 2) * 3, [0, 0, 0], [1.5, 1.5, 1.5]);
   }
-  for (const dx of [-50, 50]) for (const dz of [-6, 6]) flat.add(G.cyl6, 0x5a4a44, sx + dx, 2 + 13, sz + dz, [0, 0, 0], [0.9, 26, 0.9]);
-  awning.add(G.box, 0xffffff, sx, 2 + 27, sz, [0, 0, 0.1], [108, 1.2, 22]);
+  // canopy poles + canopy at 68 (>= 1.35 x character height)
+  for (const dx of [-56, 56]) for (const dz of [-30, 8]) flat.add(G.cyl6, 0x5a4a44, sx + dx, 2 + 33, sz + dz, [0, 0, 0], [0.9, 66, 0.9]);
+  awning.add(G.box, 0xffffff, sx, 68, sz - 11, [0, 0, 0.08], [120, 1.2, 46]);
 }
 
 /** Café chair on a world seat: seat 9 above the slab, backrest opposite `facing`. */

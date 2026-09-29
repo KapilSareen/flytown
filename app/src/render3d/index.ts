@@ -216,6 +216,10 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
       let seat: SeatKind = 'none';
       const seatDef = typeof a.seat === 'number' ? w.city.seats?.[a.seat] : undefined;
       if (seatDef && (a.actionPhase === 'sit' || a.action === 'eat')) seat = seatDef.standing ? 'stand' : 'chair';
+      if (a.action === 'sleep' && a.bed === 'bench') seat = 'bench';
+      // asleep at home: the figure is inside the building until dawn
+      const hidden = a.indoors === true;
+      if (ch.mesh.visible === hidden) { ch.mesh.visible = !hidden; ch.hit.visible = !hidden; }
       // per-frame budget: far, unselected citizens animate at half rate (their pose is sub-pixel anyway)
       const far = camDist > 900 && !selected && !followed;
       if (!far || (stats.frames + a.id) % 2 === 0) ch.update(a, w.time, far ? dt * 2 : dt, far ? animDt * 2 : animDt, groundHeight(w.city, a.x, a.y), selected, followed, camDist, seat, camera.hoverId === a.id, labelOk);

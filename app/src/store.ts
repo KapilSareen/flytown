@@ -20,6 +20,7 @@ export interface CitizenView {
   facing: number;                          // radians; where the body should face (strikes, listening)
   // slow body state, 0..1 — the game's stand-in for neuromodulation
   hunger: number; dust: number; energy: number; injury: number;
+  indoors?: boolean;                       // asleep at home: hidden inside the building until dawn
   bondWith: number | null;                 // "in love" partner
   target: number | null;                   // who they are currently courting / fighting
   inputs: Float32Array;                    // NI, latest sensory drive 0..1

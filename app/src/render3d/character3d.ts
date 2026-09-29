@@ -14,7 +14,7 @@ export type AgentLike = Omit<Agent, 'actionT' | 'actionPhase' | 'speedNorm' | 'f
   actionT?: number; actionPhase?: string; speedNorm?: number; facing?: number; seat?: number | null;
 };
 /** How the citizen is seated for the current sit/eat phase: a café chair, standing at the market stall, or not. */
-export type SeatKind = 'none' | 'chair' | 'stand';
+export type SeatKind = 'none' | 'chair' | 'stand' | 'bench';
 
 // ---- pose parameter indices -------------------------------------------------------------------
 const J = {
@@ -314,8 +314,8 @@ export class Character3D {
       case 'hurt': this.hurtPose(T, actionT); rate = 24; break;
       case 'escape': this.escapePose(T, phase ? phase === 'crouch' : actionT < 0.16, w); rate = 20; break;
       case 'sleep':
-        if (phase === 'wake') { this.idlePose(T, 0); T[J.uaLZ] = T[J.uaRZ] = 1.1; T[J.uaLX] = 0.5; T[J.uaRX] = -0.5; T[J.faLZ] = T[J.faRZ] = 1.6; T[J.headRZ] = 0.25; T[J.spineRZ] = 0.1; }
-        else this.sleepPose(T);
+        // lie / sleep / wake all stay flat on the back (wake stretches the arms up while lying)
+        this.sleepPose(T, seat === 'bench', phase === 'wake');
         rate = 6; break;
       default:
         if ((phase === 'sit' && seat === 'chair') || phase === 'sitTogether') this.sitPose(T, false);
@@ -679,13 +679,18 @@ export class Character3D {
     T[J.spineRZ] = -0.42; T[J.headRZ] = 0.3;
   }
 
-  private sleepPose(T: Float32Array) {
+  /** Flat on the back along the facing axis; pelvis lifted to the bench top (9.2 + body) or the ground (+ body). */
+  private sleepPose(T: Float32Array, onBench: boolean, waking: boolean) {
     const t = this.t, s = this.seed;
-    T[J.hipsRZ] = Math.PI / 2; T[J.hipsY] = -HIP_Y + 14.5; T[J.hipsX] = 2;
-    T[J.spineS] = 1 + 0.03 * Math.sin(t * 1.2 + s);
-    T[J.headRZ] = 0.15; T[J.headRY] = 0.2;
-    T[J.thLZ] = 0.45; T[J.thRZ] = 0.5; T[J.shLZ] = -0.8; T[J.shRZ] = -0.9;
-    T[J.uaLZ] = 1.25; T[J.uaRZ] = 1.25; T[J.uaLX] = 0.35; T[J.uaRX] = -0.35; T[J.faLZ] = T[J.faRZ] = 2.1;
+    T[J.hipsRZ] = Math.PI / 2;                       // torso backward by 90 degrees: on the back, head toward -x
+    T[J.hipsRX] = 0; T[J.hipsRY] = 0;
+    T[J.hipsY] = -HIP_Y + (onBench ? 15.5 : 6.5);     // nothing below the surface
+    T[J.hipsX] = 0;
+    T[J.spineS] = 1 + 0.03 * Math.sin(t * 1.2 + s);   // breathing
+    T[J.spineRZ] = 0; T[J.headRZ] = 0.08; T[J.headRY] = 0.1 * Math.sin(t * 0.3 + s);
+    T[J.thLZ] = 0.06; T[J.thRZ] = 0.1; T[J.shLZ] = -0.05; T[J.shRZ] = -0.08;   // legs straight along the body
+    if (waking) { T[J.uaLZ] = T[J.uaRZ] = 1.3; T[J.uaLX] = 0.4; T[J.uaRX] = -0.4; T[J.faLZ] = T[J.faRZ] = 0.4; }
+    else { T[J.uaLZ] = T[J.uaRZ] = 0.18; T[J.uaLX] = 0.25; T[J.uaRX] = -0.25; T[J.faLZ] = T[J.faRZ] = 1.6; }   // hands folded on the chest
   }
 }
 
