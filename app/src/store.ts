@@ -36,6 +36,8 @@ export interface WorldApi {
   setSpeed(x: number): void;                // world time multiplier (1 = real time)
   setBrainSpeed(x: number): void;           // brain ms per world ms
   setTimeOfDay(h: number): void;            // 0..24
+  /** Resize the town: spawn or remove citizens until `n` live (2..maxPopulation), keeping ~femaleRatio females. */
+  setPopulation(n: number, femaleRatio?: number): void;
   god: {
     fight(a: number, b: number): void;
     love(a: number, b: number): void;
@@ -66,6 +68,7 @@ export interface StoreState {
   paused: boolean;
   speed: number;
   brainSpeed: number;
+  maxPopulation: number;                   // set by the world from measured brain perf / worker count
   focus: FocusReport | null;               // live spikes for the selected citizen
   events: GameEvent[];                     // newest last, capped at 200
   perf: Perf | null;
@@ -90,6 +93,7 @@ export const useStore = create<StoreState>((set, get) => ({
   paused: false,
   speed: 1,
   brainSpeed: 0.25,
+  maxPopulation: 40,
   focus: null,
   events: [],
   perf: null,
