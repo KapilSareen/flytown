@@ -63,35 +63,35 @@ LIF = {
 #   entryNerve: exact | note
 # --------------------------------------------------------------------------------------
 INPUTS: dict[str, dict] = {
-    "visionLoomL": {"sel": [{"type": t, "side": "L"} for t in ("LC4", "LPLC2", "LC6")],
+    "visionLoomL": {"maxHz": 150, "sel": [{"type": t, "side": "L"} for t in ("LC4", "LPLC2", "LC6")],
                     "note": "LC4 + LPLC2 + LC6 lobula columnar looming detectors, left optic lobe (soma side). Ache 2019; von Reyn 2017; Klapoetke 2017."},
-    "visionLoomR": {"sel": [{"type": t, "side": "R"} for t in ("LC4", "LPLC2", "LC6")],
+    "visionLoomR": {"maxHz": 150, "sel": [{"type": t, "side": "R"} for t in ("LC4", "LPLC2", "LC6")],
                     "note": "Same as visionLoomL, right optic lobe."},
-    "visionObjectL": {"sel": [{"typeRe": r"^LC10(a|b|c-1|c-2|d)$", "side": "L"}],
+    "visionObjectL": {"maxHz": 150, "sel": [{"typeRe": r"^LC10(a|b|c-1|c-2|d)$", "side": "L"}],
                       "note": "LC10a-d small-object / figure trackers used in courtship pursuit, left lobula. Ribeiro 2018; Hindmarsh Sten 2021."},
-    "visionObjectR": {"sel": [{"typeRe": r"^LC10(a|b|c-1|c-2|d)$", "side": "R"}],
+    "visionObjectR": {"maxHz": 150, "sel": [{"typeRe": r"^LC10(a|b|c-1|c-2|d)$", "side": "R"}],
                       "note": "Same as visionObjectL, right lobula."},
-    "odorFood": {"sel": [{"type": f"ORN_{g}"} for g in ("DM1", "DM2", "DM4", "VM2", "VA2", "DM5")],
+    "odorFood": {"maxHz": 100, "sel": [{"type": f"ORN_{g}"} for g in ("DM1", "DM2", "DM4", "VM2", "VA2", "DM5")],
                  "note": "ORNs of food-odour glomeruli DM1 (Or42b), DM2 (Or22a), DM4 (Or59b), VM2 (Or43b), VA2 (Or92a), DM5 (Or85a): esters/vinegar. Semmelhack & Wang 2009; Hallem & Carlson 2006."},
-    "odorMale": {"sel": [{"type": "ORN_DA1"}],
+    "odorMale": {"maxHz": 100, "sel": [{"type": "ORN_DA1"}],
                  "note": "Or67d ORNs (glomerulus DA1) sensing the male pheromone cVA. Kurtovic 2007; Datta 2008."},
-    "odorFemale": {"sel": [{"type": "ORN_VA1v"}, {"type": "ORN_VL2a"},
+    "odorFemale": {"maxHz": 100, "sel": [{"type": "ORN_VA1v"}, {"type": "ORN_VL2a"},
                            {"typeRe": r"^LgLG(1a|6|7)$", "entryNerve": "ProLN"}],
                    "note": "Or47b (VA1v) and Ir84a (VL2a) ORNs promoting courtship (Dweck 2015; Grosjean 2011) + foreleg tarsal ppk23 GRNs (MaleCNS receptorType putative_ppk23, prothoracic leg nerve; Thistle 2012; Toda 2012). Approximation: ppk23 cells also carry male-pheromone information."},
-    "tasteSugar": {"sel": [{"typeRe": r"^LB3[abcd]$"}, {"type": "LB4b"}, {"type": "claw_tpGRN"}, {"type": "dorsal_tpGRN"},
+    "tasteSugar": {"maxHz": 150, "sel": [{"typeRe": r"^LB3[abcd]$"}, {"type": "LB4b"}, {"type": "claw_tpGRN"}, {"type": "dorsal_tpGRN"},
                            {"type": "PhG9"}, {"type": "LgAG9"}],
                    "note": "MaleCNS has no Gr labels. Labellar bristle GRN types LB3a-d/LB4b were classified as sugar (Gr64f/Gr5a) because they are the direct presynaptic partners of the Shiu 2022 sugar second-order neurons (G2N-1, Zorro, Rattle, Usnea, Phantom, Clavicle, Fudog; ~7,000 synapses, 0 onto bitter neurons). Taste-peg GRNs (Rattle input), pharyngeal PhG9 (sugar SEL LN input) and ascending tarsal LgAG9 are added as approximations. Shiu 2022; Shiu 2024; Dahanukar 2007."},
-    "tasteBitter": {"sel": [{"typeRe": r"^LB1[abcd]$"}, {"type": "LgAG5"}],
+    "tasteBitter": {"maxHz": 150, "sel": [{"typeRe": r"^LB1[abcd]$"}, {"type": "LgAG5"}],
                     "note": "Labellar LB1a-d and ascending tarsal LgAG5 GRNs are the only gustatory types presynaptic to the Shiu 2022 / Yao & Scott 2022 bitter neurons (Scapula, Bitter-SEL DNg28; ~3,000 synapses, ~0 onto sugar neurons) => Gr66a bitter GRNs. Weiss 2011; Shiu 2022."},
-    "touchAntenna": {"sel": [{"typeRe": r"^JO-C"}, {"typeRe": r"^JO-E"}, {"typeRe": r"^JO-F"}, {"type": "BM", "entryNerve": "AN"}],
+    "touchAntenna": {"maxHz": 150, "sel": [{"typeRe": r"^JO-C"}, {"typeRe": r"^JO-E"}, {"typeRe": r"^JO-F"}, {"type": "BM", "entryNerve": "AN"}],
                      "note": "Johnston's organ C/E (wind/gravity, static deflection) and F (MaleCNS subclass 'grooming') neurons + antennal bristle mechanosensory neurons (type BM entering via the antennal nerve). Kamikouchi 2009; Hampel 2015; Seeds 2014."},
-    "soundSong": {"sel": [{"typeRe": r"^JO-A"}, {"typeRe": r"^JO-B"}],
+    "soundSong": {"maxHz": 150, "sel": [{"typeRe": r"^JO-A"}, {"typeRe": r"^JO-B"}],
                   "note": "Johnston's organ A/B vibration-sensitive (auditory) neurons that carry courtship song. Kamikouchi 2009; Yorozu 2009."},
-    "light": {"sel": [{"type": "l-LNv"}, {"type": "DN1pA"}, {"type": "DN1pB"}, {"type": "HBeyelet"}, {"type": "aMe4"}, {"type": "MeVC20"}],
+    "light": {"maxHz": 60, "sel": [{"type": "l-LNv"}, {"type": "DN1pA"}, {"type": "DN1pB"}, {"type": "HBeyelet"}, {"type": "aMe4"}, {"type": "MeVC20"}],
               "note": "Large ventral lateral neurons (PDF, arousal, light-responsive) and DN1p clock neurons (Sheeba 2008; Guo 2016) + the Hofbauer-Buchner eyelet extra-retinal photoreceptors that synapse onto the LNvs (Helfrich-Forster 2002). APPROXIMATION: l-LNv -> s-LNv signalling is peptidergic (PDF, no >=5-synapse edge in MaleCNS) and l-LNv synaptic output lies in the medulla, so the accessory-medulla / medulla neurons aMe4 and MeVC20, the strongest synaptic inputs to s-LNv in MaleCNS (visual-system light input to the pacemaker; Reinhard 2024 clock connectome), are included so that daylight can reach the clock synaptically."},
-    "punish": {"sel": [{"typeRe": r"^PPL10[1-8]$"}],
+    "punish": {"maxHz": 50, "sel": [{"typeRe": r"^PPL10[1-8]$"}],
                "note": "PPL1 dopaminergic neurons (PPL1-gamma1pedc, alpha'2alpha2, alpha3, ...) signal punishment to the mushroom body. Aso 2014; Claridge-Chang 2009."},
-    "reward": {"sel": [{"typeRe": r"^PAM(0[1-9]|1[0-5])$"}],
+    "reward": {"maxHz": 50, "sel": [{"typeRe": r"^PAM(0[1-9]|1[0-5])$"}],
                "note": "PAM dopaminergic neurons signal reward (sugar / water) to the mushroom body. Liu 2012; Aso 2014."},
 }
 
@@ -122,8 +122,12 @@ OUTPUTS: dict[str, dict] = {
               "note": "Small ventral lateral neurons, the core PDF pacemaker. Renn 1999; Helfrich-Forster 2007."},
 }
 
-# Explicit male-only cells (contract); union with dimorphism == 'male-specific' in the pruned brain.
-MALE_ONLY_RE = re.compile(r"^(pIP10|vPR6|aSP10|aSP22|pC1_|pC1x)")
+# Explicit male-only cells (contract). Seed regex covers the whole courtship cluster; the female-silenced
+# list is narrower: pC1 subtypes that are fru+ (fruDsx 'coexpress_*' / 'fru_*') are the male-specific P1
+# neurons, while dsx-only pC1 have female counterparts (pC1a-e; Zhou 2014, Wang 2020) and stay active so
+# that the female 'courtship' readout can mean receptivity.
+MALE_SEED_RE = re.compile(r"^(pIP10|vPR6|aSP10|aSP22|pC1_|pC1x)")
+MALE_ONLY_RE = re.compile(r"^(pIP10|vPR6|aSP10|aSP22)")
 
 REGION_ORDER = ["Optic lobe", "Antennal lobe / olfactory", "Mushroom body", "Central complex", "Lateral horn",
                 "SEZ / gustatory", "Descending", "VNC motor", "Clock", "Courtship/aggression (pC1/aIPg/aSP)", "Other"]
@@ -192,6 +196,9 @@ def main() -> None:
     ap.add_argument("--cache", default=None, help="optional npz cache of the filtered edge list")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--hop2-weight", type=float, default=0.25)
+    ap.add_argument("--exclude-types", default="lLN1_bc,DNge022,DNge027,DNge039",
+                    help="comma list of non-channel cell types never included (recurrent excitatory modules that make the "
+                         "pure LIF bistable; see manifest.pruning.excludedTypes)")
     ap.add_argument("--quota-in", type=int, default=60, help="guaranteed strongest postsynaptic partners per input channel")
     ap.add_argument("--quota-in2", type=int, default=40, help="guaranteed strongest 2nd-order postsynaptic partners per input channel")
     ap.add_argument("--quota-out", type=int, default=60, help="guaranteed strongest presynaptic partners per output channel")
@@ -215,6 +222,7 @@ def main() -> None:
     a_dim = np.array([s(x) for x in A["dimorphism"]])
     a_nerve = np.array([s(x) for x in A["entryNerve"]])
     a_syn = np.array([s(x) for x in A["synonyms"]])
+    a_fd = np.array([s(x) for x in A["fruDsx"]])
     side_raw = np.array([s(a) or s(b) for a, b in zip(A["somaSide"], A["rootSide"])])
     a_side = np.where(side_raw == "L", 1, np.where(side_raw == "R", 2, 0)).astype(np.uint8)
     del A
@@ -293,7 +301,7 @@ def main() -> None:
             log(f"  {kind:7s} {name:14s} {len(rows):5d} neurons  {sorted(set(a_type[rows].tolist()))[:12]}")
 
     # ---------------------------------------------------------------- seed & male-only
-    male_re_rows = np.nonzero(np.array([bool(MALE_ONLY_RE.match(t)) for t in a_type]) & traced)[0]
+    male_re_rows = np.nonzero(np.array([bool(MALE_SEED_RE.match(t)) for t in a_type]) & traced)[0]
     seed_rows = np.unique(np.concatenate([r for k in chan_rows.values() for r in k.values()] + [male_re_rows]))
     log(f"seed = {len(seed_rows):,} neurons (channels + male-only cells)")
 
@@ -341,6 +349,12 @@ def main() -> None:
         frontier = nb
         log(f"  hop {h}: +{nb.sum():,} neurons (reach {reach.sum():,})")
 
+    excluded_types = [t for t in args.exclude_types.split(",") if t]
+    excl_mask = np.isin(a_type, excluded_types) & ~seed_mask
+    if excl_mask.any():
+        log(f"excluding {int(excl_mask.sum())} neurons of types {excluded_types} (recurrent excitatory modules; see manifest)")
+        reach &= ~excl_mask
+        score[excl_mask] = 0
     cand = np.nonzero(reach & ~seed_mask & (score > 0))[0]
     log(f"candidates with score > 0: {len(cand):,} (of {int((reach & ~seed_mask).sum()):,} reachable)")
 
@@ -359,24 +373,42 @@ def main() -> None:
     nt_sign_row = np.array([0] + [NT_SIGN[x] for x in NT_NAMES[1:]], dtype=np.int64)[
         np.array([body2nt.get(int(b), 0) for b in a_body], dtype=np.int64)]
 
-    def second_order(first: np.ndarray, direction: str, k: int) -> np.ndarray:
-        """partners of the *excitatory* first-order partners, excluding the first-order set itself
-        (signal is carried forward by excitatory neurons; inhibitory LNs would otherwise dominate)"""
+    tot_out_row = np.bincount(ann_row_pre, weights=w64, minlength=n_ann)
+    tot_in_row = np.bincount(ann_row_post, weights=w64, minlength=n_ann)
+
+    def second_order(rows: np.ndarray, first: np.ndarray, direction: str, k: int) -> np.ndarray:
+        """drive-weighted second-order partners: each excitatory first-order partner x is weighted by the
+        share of its input (output) that comes from (goes to) the channel, so pan-glomerular local neurons
+        that receive a sliver from every channel do not swamp the ranking with their own huge output."""
+        msk = np.zeros(n_ann, bool); msk[rows] = True
         exc = first[nt_sign_row[first] > 0]
         if len(exc) == 0:
             return np.zeros(0, dtype=np.int64)
-        res = top_partners(exc, direction, k + len(first))
-        return res[~np.isin(res, first)][:k]
+        if direction == "post":
+            m = msk[ann_row_pre] & np.isin(ann_row_post, exc)
+            d1 = np.bincount(ann_row_post[m], weights=w64[m], minlength=n_ann)
+            share = np.zeros(n_ann); share[exc] = d1[exc] / np.maximum(tot_in_row[exc], 1)
+            m2 = share[ann_row_pre] > 0
+            v = np.bincount(ann_row_post[m2], weights=w64[m2] * share[ann_row_pre[m2]], minlength=n_ann)
+        else:
+            m = msk[ann_row_post] & np.isin(ann_row_pre, exc)
+            d1 = np.bincount(ann_row_pre[m], weights=w64[m], minlength=n_ann)
+            share = np.zeros(n_ann); share[exc] = d1[exc] / np.maximum(tot_out_row[exc], 1)
+            m2 = share[ann_row_post] > 0
+            v = np.bincount(ann_row_pre[m2], weights=w64[m2] * share[ann_row_post[m2]], minlength=n_ann)
+        v[seed_mask] = 0; v[is_kc] = 0; v[~traced] = 0; v[first] = 0
+        cand_ = np.nonzero(v > 0)[0]
+        return cand_[np.argsort(-v[cand_], kind="stable")[:k]]
 
     guaranteed = []
     for name, rows in chan_rows["inputs"].items():
         first = top_partners(rows, "post", args.quota_in)
         guaranteed.append(first)
-        guaranteed.append(second_order(first, "post", args.quota_in2))
+        guaranteed.append(second_order(rows, first, "post", args.quota_in2))
     for name, rows in chan_rows["outputs"].items():
         first = top_partners(rows, "pre", args.quota_out)
         guaranteed.append(first)
-        guaranteed.append(second_order(first, "pre", args.quota_out2))
+        guaranteed.append(second_order(rows, first, "pre", args.quota_out2))
     # all uniglomerular projection neurons of the glomeruli used by the odour channels
     glom = sorted({t.split("_", 1)[1] for c in ("odorFood", "odorMale", "odorFemale") for t in chan_types["inputs"][c] if t.startswith("ORN_")})
     pn_re = re.compile(r"^(" + "|".join(map(re.escape, glom)) + r")_.*PN")
@@ -468,9 +500,14 @@ def main() -> None:
     log("regions: " + ", ".join(f"{k}={len(v)}" for k, v in regions.items()))
 
     # ---------------------------------------------------------------- male-only
-    male_mask = np.array([bool(MALE_ONLY_RE.match(t)) for t in a_type[chosen]]) | (a_dim[chosen] == "male-specific")
+    ch_type, ch_dim, ch_fd = a_type[chosen], a_dim[chosen], a_fd[chosen]
+    is_pc1 = np.array([t.startswith("pC1_") for t in ch_type])
+    fru_pc1 = is_pc1 & np.array([("fru" in f) or ("coexpress" in f) for f in ch_fd])
+    male_mask = (np.array([bool(MALE_ONLY_RE.match(t)) for t in ch_type])
+                 | (~is_pc1 & (ch_dim == "male-specific")) | fru_pc1)
     male_only = np.nonzero(male_mask)[0].tolist()
-    male_types = sorted(set(a_type[chosen][male_mask].tolist()))
+    male_types = sorted(set(ch_type[male_mask].tolist()))
+    log(f"pC1 split: {int(fru_pc1.sum())} fru+ (male-only) / {int((is_pc1 & ~fru_pc1).sum())} dsx-only (kept in females)")
     log(f"male-only: {len(male_only)} neurons, {len(male_types)} types")
 
     # ---------------------------------------------------------------- channel index lists
@@ -483,6 +520,8 @@ def main() -> None:
             d = {"neurons": idx, "cellTypes": chan_types[kind][name], "note": spec["note"]}
             if "rateMaxHz" in spec:
                 d["rateMaxHz"] = spec["rateMaxHz"]
+            if "maxHz" in spec:
+                d["maxHz"] = spec["maxHz"]  # inputs: Poisson rate at input value 1.0
             out[name] = d
         return out
 
@@ -507,6 +546,13 @@ def main() -> None:
             "ntRule": ("consensus_nt per presynaptic body, else predicted_nt; sign ACh +1, GABA -1, Glu -1, DA/OA/5HT +1 "
                        "(ntGain 0.3), histamine -1; unknown -> edge dropped"),
             "edgesDroppedUnknownNt": dropped_unknown,
+            "excludedTypes": excluded_types,
+            "excludedTypesReason": ("non-channel cell types left out on purpose: lLN1_bc (26 cholinergic antennal-lobe local "
+                                    "neurons, ~11,000 recurrent synapses per cell) and DNge022/DNge027/DNge039 (reciprocally "
+                                    "connected with the antennal-grooming DNs aDN1/aDN2, 926-synapse edge) form recurrent "
+                                    "excitatory loops that a pure LIF without adaptation cannot switch off: with them the "
+                                    "antennal lobe stays saturated after any odour and grooming DNs latch at ~200 Hz after any "
+                                    "antennal touch (tools/validate_brain.py persistence test)."),
             "fullBrainDefinition": "bodies with status == Traced; edges >= minSynapses between them",
             "warnings": WARNINGS,
         },
@@ -522,11 +568,14 @@ def main() -> None:
                          "heavily innervated neurons are scaled down, sparse ones are not scaled up.",
         },
         "channels": {"inputs": chan_json("inputs", INPUTS), "outputs": chan_json("outputs", OUTPUTS)},
+        "inputMaxHzNote": "inputs[i].maxHz = Poisson spike rate (Hz) of every neuron in the channel when the world sets the channel to 1.0 (ORNs saturate near 100 Hz, dopaminergic neurons fire slowly); default 150 if absent",
         "regions": regions,
         "sexSpecific": {"maleOnly": male_only,
-                        "note": ("silenced in female bodies: pIP10, vPR6, aSP10*, aSP22, pC1_*/pC1x* (all pC1 are annotated "
-                                 "male-specific in MaleCNS) plus every other neuron annotated dimorphism == 'male-specific' "
-                                 f"({len(male_types)} types)"), "types": male_types},
+                        "note": ("silenced in female bodies: pIP10, vPR6, aSP10*, aSP22, the fru-expressing pC1 (P1) subtypes, "
+                                 "and every other neuron annotated dimorphism == 'male-specific' in MaleCNS "
+                                 f"({len(male_types)} types). dsx-only pC1 subtypes and pC1x/aIPg (sexually dimorphic, present "
+                                 "in females) stay active so the female 'courtship' readout can be read as receptivity and "
+                                 "females can be aggressive (Schretter 2020)."), "types": male_types},
     }
 
     # ---------------------------------------------------------------- write

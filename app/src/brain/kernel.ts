@@ -86,6 +86,7 @@ export class LifKernel {
   // graph-derived constants
   private readonly wEff: Float32Array;       // per edge: signed mV kick to g[post]
   private readonly inputNeurons: Uint32Array[]; // per input channel
+  private readonly inputMaxHz: Float32Array;     // per input channel Poisson rate at drive 1.0 (manifest maxHz, default INPUT_MAX_HZ)
   private readonly outputNeurons: Uint32Array[];
   private readonly outChan: Int8Array;       // neuron -> output channel or -1
   private readonly outInvSize: Float32Array; // 1/|neurons| per output channel
@@ -157,6 +158,10 @@ export class LifKernel {
     const clean = (list: number[] | undefined) =>
       Uint32Array.from((list ?? []).filter((i) => i >= 0 && i < n));
     this.inputNeurons = INPUT_CHANNELS.map((c) => clean(manifest.channels.inputs[c]?.neurons));
+    this.inputMaxHz = Float32Array.from(INPUT_CHANNELS.map((c) => {
+      const hz = (manifest.channels.inputs[c] as { maxHz?: number } | undefined)?.maxHz;
+      return typeof hz === 'number' && hz > 0 ? hz : INPUT_MAX_HZ;
+    }));
     this.outputNeurons = OUTPUT_CHANNELS.map((c) => clean(manifest.channels.outputs[c]?.neurons));
     this.outChan = new Int8Array(n).fill(-1);
     this.outInvSize = new Float32Array(NO);
@@ -335,7 +340,7 @@ export class LifKernel {
     const base = a * NI;
     const inputW = this.inputW;
     for (let i = 0; i < NI; i++) {
-      const p = inputs[base + i] * ag.modGain[i] * INPUT_MAX_HZ * dt / 1000;
+      const p = inputs[base + i] * ag.modGain[i] * this.inputMaxHz[i] * dt / 1000;
       if (p <= 0) continue;
       const list = this.inputNeurons[i];
       for (let k = 0; k < list.length; k++) {

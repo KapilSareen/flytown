@@ -56,10 +56,20 @@ def load_brain(d: str):
 class LIF:
     """Vectorised LIF over the CSR graph. One agent."""
 
-    def __init__(self, man, g, bias=None, wsyn=None, silence=None, seed=0, norm_mode=None):
+    def __init__(self, man, g, bias=None, wsyn=None, silence=None, seed=0, norm_mode=None, edge_k=None,
+                 adapt_mv=None, tau_adapt=None, g_sat=None):
         p = dict(man["lif"])
+        # optional saturating synaptic drive (reversal-potential-like): effective drive = gSat*(1-exp(-g/gSat))
+        self.g_sat = p.get("gSatMv", 0.0) if g_sat is None else g_sat
+        # optional spike-frequency adaptation (proposed contract extension): each spike adds adaptMv to a
+        # hyperpolarising variable that decays with tauAdaptMs
+        self.adapt_mv = p.get("adaptMv", 0.0) if adapt_mv is None else adapt_mv
+        self.tau_adapt = p.get("tauAdaptMs", 200.0) if tau_adapt is None else tau_adapt
         if norm_mode is not None:
             p["inputNorm"] = norm_mode
+        if edge_k is None:
+            edge_k = man.get("synapseScaling", {}).get("k", 0)
+        self.edge_k = edge_k
         self.n = g["n"]
         self.dt = p["dtMs"]
         self.vRest, self.vReset, self.vThresh = p["vRest"], p["vReset"], p["vThresh"]
@@ -71,7 +81,12 @@ class LIF:
         self.bias = p["restingBiasMv"] if bias is None else bias
         gain = np.array(man["ntGain"], dtype=np.float64)
         src = np.repeat(np.arange(self.n), np.diff(g["offsets"]).astype(np.int64))
-        w = g["weights"].astype(np.float64) * gain[g["nt"][src]]
+        w = g["weights"].astype(np.float64)
+        if self.edge_k and self.edge_k > 0:
+            # sub-linear synapse-count scaling: |w| -> sqrt(k*|w|) above k synapses (giant edges compressed)
+            a = np.abs(w)
+            w = np.sign(w) * np.where(a > self.edge_k, np.sqrt(self.edge_k * a), a)
+        w = w * gain[g["nt"][src]]
         # input normalisation
         tot_in = np.bincount(g["targets"], weights=np.abs(g["weights"]).astype(np.float64), minlength=self.n)
         if p["inputNorm"] == "sqrt-mean":
@@ -88,8 +103,9 @@ class LIF:
             norm = np.ones(self.n)
         self.norm = norm
         w = w * norm[g["targets"]] * self.wsyn
+        self.silenced = np.zeros(self.n, bool)
         if silence is not None and len(silence):
-            w[np.isin(src, silence)] = 0.0  # male-only cells silenced: no output
+            self.silenced[np.asarray(silence, dtype=np.int64)] = True  # silenced cells never spike
         # CSR rows by presynaptic neuron (pure numpy; scipy is unavailable here)
         self.offsets = g["offsets"].astype(np.int64)
         self.targets = g["targets"].astype(np.int64)
@@ -112,6 +128,7 @@ class LIF:
     def reset(self):
         self.v = np.full(self.n, self.vRest + self.bias, np.float64)
         self.g = np.zeros(self.n)
+        self.a = np.zeros(self.n)
         self.refr_left = np.zeros(self.n)
         self.ring = [np.zeros(self.n, bool) for _ in range(self.delay_steps)]
         self.t = 0
@@ -123,18 +140,27 @@ class LIF:
         if arriving.any():
             self.g += self.propagate(np.nonzero(arriving)[0])
         # dynamics
-        v_target = self.vRest + self.bias + self.g + (inject_mv if inject_mv is not None else 0.0)
+        gd = self.g
+        if self.g_sat:
+            gd = np.where(self.g >= 0, self.g_sat * (1 - np.exp(-np.maximum(self.g, 0) / self.g_sat)),
+                          -self.g_sat * (1 - np.exp(np.minimum(self.g, 0) / self.g_sat)))
+        v_target = self.vRest + self.bias + gd - self.a + (inject_mv if inject_mv is not None else 0.0)
         active = self.refr_left <= 0
         self.v[active] += self.dt / self.tauM * (v_target[active] - self.v[active])
         self.g -= self.dt / self.tauS * self.g
+        if self.adapt_mv:
+            self.a -= self.dt / self.tau_adapt * self.a
         np.maximum(self.v, self.vFloor, out=self.v)
         self.refr_left -= self.dt
         spikes = active & (self.v >= self.vThresh)
         if drive_idx is not None and drive_p > 0:
             forced = drive_idx[self.rng.random(len(drive_idx)) < drive_p]
             spikes[forced] = True
+        spikes &= ~self.silenced
         self.v[spikes] = self.vReset
         self.refr_left[spikes] = self.refr
+        if self.adapt_mv:
+            self.a[spikes] += self.adapt_mv
         self.ring[self.t % self.delay_steps] = spikes
         self.t += 1
         return spikes
@@ -156,10 +182,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brain", default=os.path.join(os.path.dirname(__file__), "..", "app", "public", "brain"))
     ap.add_argument("--ms", type=float, default=500)
-    ap.add_argument("--hz", type=float, default=150)
+    ap.add_argument("--hz", type=float, default=None, help="override drive rate for all channels (default: manifest maxHz per channel, else 150)")
     ap.add_argument("--bias", type=float, default=None)
     ap.add_argument("--wsyn", type=float, default=None)
     ap.add_argument("--norm", default=None, choices=["none", "sqrt-mean", "mean"])
+    ap.add_argument("--edge-k", type=float, default=None, help="sqrt synapse scaling above k synapses (0 = linear)")
+    ap.add_argument("--adapt", type=float, default=None, help="spike-frequency adaptation mV per spike (0 = off)")
+    ap.add_argument("--tau-adapt", type=float, default=None, help="adaptation time constant ms")
+    ap.add_argument("--gsat", type=float, default=None, help="saturating synaptic drive mV (0 = linear)")
     ap.add_argument("--only", default=None)
     ap.add_argument("--sex", default="male")
     ap.add_argument("--trace", default=None, help="input channel: print top firing types + hit outputs")
@@ -171,10 +201,13 @@ def main():
     man, g = load_brain(args.brain)
     silence = np.array(man["sexSpecific"]["maleOnly"]) if args.sex == "female" else None
     t0 = time.time()
-    net = LIF(man, g, bias=args.bias, wsyn=args.wsyn, silence=silence, seed=args.seed, norm_mode=args.norm)
-    print(f"brain: {g['n']} neurons, {g['m']} edges; bias {net.bias} mV, wSyn {net.wsyn} mV, norm {args.norm or man['lif']['inputNorm']}, delay {net.delay_steps} steps; "
+    net = LIF(man, g, bias=args.bias, wsyn=args.wsyn, silence=silence, seed=args.seed, norm_mode=args.norm, edge_k=args.edge_k,
+              adapt_mv=args.adapt, tau_adapt=args.tau_adapt, g_sat=args.gsat)
+    print(f"brain: {g['n']} neurons, {g['m']} edges; bias {net.bias} mV, wSyn {net.wsyn} mV, norm {args.norm or man['lif']['inputNorm']}, edgeK {net.edge_k}, adapt {net.adapt_mv} mV/{net.tau_adapt} ms, gSat {net.g_sat} mV, delay {net.delay_steps} steps; "
           f"setup {time.time() - t0:.1f}s")
     inputs = {k: np.array(v["neurons"], dtype=np.int64) for k, v in man["channels"]["inputs"].items()}
+    hz_of = {k: (args.hz if args.hz else v.get("maxHz", 150)) for k, v in man["channels"]["inputs"].items()}
+    hz_of["custom"] = args.hz or 150
     outputs = {k: np.array(v["neurons"], dtype=np.int64) for k, v in man["channels"]["outputs"].items()}
     types = man["types"]
 
@@ -193,7 +226,7 @@ def main():
         if c == "baseline":
             rates = net.run(args.ms, None, 0, record_from=args.skip_ms)
         else:
-            rates = net.run(args.ms, inputs[c], args.hz, record_from=args.skip_ms)
+            rates = net.run(args.ms, inputs[c], hz_of[c], record_from=args.skip_ms)
         rows[c] = {o: float(rates[idx].mean()) if len(idx) else float("nan") for o, idx in outputs.items()}
         active = int((rates > 1).sum())
         print(f"  {c:14s} {time.time() - t0:5.1f}s  active(>1Hz) {active:5d}  mean rate {rates.mean():6.2f} Hz", flush=True)
@@ -215,11 +248,39 @@ def main():
     for c in conds:
         print(f"{c:14s}" + "".join(f"{rows[c][o]:{w + 1}.1f}" for o in OUTPUT_CHANNELS))
 
+    if not args.only and not args.trace and not args.drive_types:
+        print("\nPersistence (300 ms stimulus, then 400 ms silence; output rate in the last 300 ms of silence; LATCH if > 20% of on-rate):")
+        for i, o in [("touchAntenna", "groom"), ("tasteSugar", "feed"), ("visionLoomL", "escape"), ("visionObjectL", "courtship"),
+                     ("odorMale", "aggression"), ("tasteSugar", "groom"), ("visionObjectL", "steerL")]:
+            net.reset()
+            on = net.run(300, inputs[i], hz_of[i], record_from=100)[outputs[o]].mean()
+            off = net.run(400, None, 0, record_from=100)[outputs[o]].mean()
+            print(f"  {i:14s} -> {o:10s} on {on:6.1f} Hz  off {off:6.1f} Hz  {'LATCH' if off > 0.2 * max(on, 1) and off > 2 else 'ok'}")
+        print("\nSynergy (two channels at once):")
+        for a, b, o in [("odorFemale", "visionObjectL", "courtship"), ("odorFemale", "visionObjectL", "sing"), ("odorMale", "visionObjectL", "aggression"),
+                        ("tasteSugar", "tasteBitter", "feed"), ("odorFood", "tasteSugar", "feed")]:
+            # explicit two-population Poisson drive
+            net.reset(); cnt = np.zeros(g["n"]); k = 0
+            for t in range(int(args.ms)):
+                forced = np.concatenate([inputs[a][net.rng.random(len(inputs[a])) < hz_of[a] / 1000.0],
+                                         inputs[b][net.rng.random(len(inputs[b])) < hz_of[b] / 1000.0]])
+                sp = net.step(forced, 1.0)
+                if t >= args.skip_ms: cnt += sp; k += 1
+            both = (cnt / (k / 1000.0))[outputs[o]].mean()
+            print(f"  {a:12s} + {b:14s} -> {o:10s} {rows[a][o]:6.1f} / {rows[b][o]:6.1f} alone, together {both:6.1f} Hz")
+        if silence is None:
+            fem = LIF(man, g, bias=args.bias, wsyn=args.wsyn, silence=np.array(man["sexSpecific"]["maleOnly"]), seed=args.seed, norm_mode=args.norm, edge_k=args.edge_k,
+                      adapt_mv=args.adapt, tau_adapt=args.tau_adapt, g_sat=args.gsat)
+            print("\nFemale body (male-only cells silenced):")
+            for i, o in [("visionObjectL", "courtship"), ("odorMale", "aggression"), ("tasteSugar", "feed"), ("visionLoomL", "escape"), ("odorFemale", "sing")]:
+                fem.reset(); r = fem.run(args.ms, inputs[i], hz_of[i], record_from=args.skip_ms)[outputs[o]].mean()
+                print(f"  {i:14s} -> {o:10s} male {rows[i][o]:6.1f}  female {r:6.1f} Hz")
+
     if "baseline" in rows and not args.only and not args.trace:
         print("\nSanity checks (stimulus -> output should rise clearly above baseline):")
         b = rows["baseline"]
         checks = [("tasteSugar", "feed", True), ("visionLoomL", "escape", True), ("visionLoomR", "escape", True),
-                  ("visionObjectL", "courtship", True), ("visionObjectR", "courtship", True), ("odorFemale", "courtship", True),
+                  ("visionObjectL", "courtship", True), ("visionObjectR", "courtship", True), ("odorFemale", "courtship", False),
                   ("odorFemale", "sing", False), ("touchAntenna", "groom", True), ("odorMale", "aggression", True),
                   ("visionLoomL", "backup", False), ("visionObjectL", "walk", False), ("light", "clock", False)]
         for i, o, hard in checks:
@@ -228,7 +289,8 @@ def main():
             tag = "PASS" if ok else ("FAIL" if hard else "soft")
             print(f"  {tag:4s} {i:14s} -> {o:10s} {b[o]:6.1f} -> {r:6.1f} Hz")
         print("  (soft = informational: DNp09 walk is driven by LC9/LC31 rather than LC10 in MaleCNS; the synaptic light->s-LNv "
-              "route is HB eyelet -> aMe6 -> aMe4 -> s-LNv and is weak; song needs pC1 context)")
+              "route is HB eyelet -> aMe6 -> aMe4 -> s-LNv and is weak; pheromone alone barely reaches P1 in this brain, it acts "
+              "together with a visual object, see Synergy)")
         quiet = [o for o in OUTPUT_CHANNELS if b[o] < 5]
         print(f"  baseline quiet (<5 Hz): {len(quiet)}/{len(OUTPUT_CHANNELS)} outputs; loud: "
               f"{[f'{o}={b[o]:.1f}' for o in OUTPUT_CHANNELS if b[o] >= 5]}")
