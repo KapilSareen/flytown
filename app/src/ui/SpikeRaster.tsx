@@ -1,14 +1,17 @@
-// Live spike raster: x = time (one column per worker report window, scrolling left),
+// Live spike raster on a cream well. x = wall-clock time (fixed slices, ~10 s across),
 // y = neuron rank bucketed to ROWS rows, neurons grouped by region and coloured by it.
-// History is kept in an offscreen ring-buffer canvas; the visible canvas is
-// composited every animation frame so the scroll is smooth between reports.
+// History lives in an offscreen ring-buffer canvas; the visible canvas is composited
+// every animation frame so the scroll is continuous whatever the worker's report rate.
 import { useEffect, useMemo, useRef } from 'react';
 import type { BrainManifest, FocusReport } from '../brain/types';
 import { useStore } from '../store';
 import { regionColor } from './labels';
 
 const ROWS = 120;
-const COLS = 160; // 2px columns on a ~320px canvas: dots stay crisp, nothing aliases away
+const COLS = 160;
+const SPAN_MS = 10_000;
+const SLICE_MS = SPAN_MS / COLS;
+const FALLBACK = '#6b645c';
 
 interface Layout { rowOf: Uint8Array; rowColor: string[]; regionNames: string[] }
 
@@ -21,42 +24,53 @@ function buildLayout(m: BrainManifest): Layout {
   regionNames.forEach((name, ri) => {
     for (const idx of m.regions[name]) if (regionOf[idx] === 255) regionOf[idx] = ri;
   });
-  // rank neurons: by region order, then index; unassigned last
   const order = new Uint32Array(n);
   let k = 0;
   for (let ri = 0; ri < regionNames.length; ri++) for (let i = 0; i < n; i++) if (regionOf[i] === ri) order[k++] = i;
   for (let i = 0; i < n; i++) if (regionOf[i] === 255) order[k++] = i;
   const rowOf = new Uint8Array(n);
-  const rowColor = new Array<string>(ROWS).fill('#6b645c');
+  const rowColor = new Array<string>(ROWS).fill(FALLBACK);
   for (let r = 0; r < n; r++) {
     const row = Math.min(ROWS - 1, Math.floor((r * ROWS) / n));
     rowOf[order[r]] = row;
     const reg = regionOf[order[r]];
-    if (rowColor[row] === '#6b645c' && reg !== 255) rowColor[row] = regionColor(reg);
+    if (rowColor[row] === FALLBACK && reg !== 255) rowColor[row] = regionColor(reg);
   }
   return { rowOf, rowColor, regionNames };
 }
 
+interface Ring { canvas: HTMLCanvasElement; cursor: number; colStart: number; agent: number }
+
 export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; focus?: FocusReport | null; agentId: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const layout = useMemo(() => buildLayout(manifest), [manifest]);
-  const ring = useRef<{ canvas: HTMLCanvasElement; cursor: number; lastAt: number; interval: number; agent: number } | null>(null);
+  const ring = useRef<Ring | null>(null);
   const counts = useRef(new Uint16Array(ROWS));
+  const lastSpikes = useRef<Uint32Array | null>(null);
+  const lastSig = useRef(-1);
 
-  const getRing = () => {
+  const getRing = (): Ring => {
     if (!ring.current) {
       const c = document.createElement('canvas');
       c.width = COLS; c.height = ROWS;
-      ring.current = { canvas: c, cursor: 0, lastAt: performance.now(), interval: 80, agent: -1 };
+      ring.current = { canvas: c, cursor: 0, colStart: performance.now(), agent: -1 };
     }
     return ring.current;
   };
 
-  // ingest one report window as one column. Driven by the store directly so it
-  // works whether the world republishes a new focus object, the same object with a
-  // new spikes array, or even the same array mutated in place (signature check).
-  const lastSpikes = useRef<Uint32Array | null>(null);
-  const lastSig = useRef(-1);
+  /** Move the write head to the slice that contains `now`, clearing the slices it skips. */
+  const advance = (r: Ring, ctx: CanvasRenderingContext2D, now: number) => {
+    let steps = Math.floor((now - r.colStart) / SLICE_MS);
+    if (steps <= 0) return 0;
+    if (steps >= COLS) { ctx.clearRect(0, 0, COLS, ROWS); r.cursor = 0; r.colStart = now; return COLS; }
+    for (let i = 0; i < steps; i++) { r.cursor = (r.cursor + 1) % COLS; ctx.clearRect(r.cursor, 0, 1, ROWS); }
+    r.colStart += steps * SLICE_MS;
+    return steps;
+  };
+
+  // ingest: each report is stamped into the current slice; slices skipped since the
+  // previous report get the same stamp (sample-and-hold), so a slow worker still
+  // leaves a continuous trail.
   useEffect(() => {
     const ingest = (focus: FocusReport | null) => {
       if (!focus || focus.agentId !== agentId) return;
@@ -67,27 +81,30 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
       const r = getRing();
       const ctx = r.canvas.getContext('2d');
       if (!ctx) return;
-      if (r.agent !== agentId) { ctx.clearRect(0, 0, COLS, ROWS); r.agent = agentId; r.cursor = 0; }
       const now = performance.now();
-      const dt = now - r.lastAt;
-      if (dt > 0 && dt < 2000) r.interval = r.interval * 0.8 + dt * 0.2;
-      r.lastAt = now;
+      if (r.agent !== agentId) { ctx.clearRect(0, 0, COLS, ROWS); r.agent = agentId; r.cursor = 0; r.colStart = now; }
+      const skipped = advance(r, ctx, now);
+
       const cnt = counts.current; cnt.fill(0);
       const rowOf = layout.rowOf;
       for (let i = 0; i < sp.length; i++) { const idx = sp[i]; cnt[idx < rowOf.length ? rowOf[idx] : ROWS - 1]++; }
-      ctx.clearRect(r.cursor, 0, 1, ROWS);
-      for (let row = 0; row < ROWS; row++) {
-        const c = cnt[row];
-        if (!c) continue;
-        ctx.globalAlpha = Math.min(1, 0.7 + c * 0.15);
-        ctx.fillStyle = layout.rowColor[row];
-        ctx.fillRect(r.cursor, row, 1, 1);
-      }
-      ctx.globalAlpha = 1;
-      r.cursor = (r.cursor + 1) % COLS;
+      const stamp = (col: number) => {
+        ctx.clearRect(col, 0, 1, ROWS);
+        for (let row = 0; row < ROWS; row++) {
+          const c = cnt[row];
+          if (!c) continue;
+          ctx.globalAlpha = Math.min(1, 0.55 + c * 0.15);
+          ctx.fillStyle = layout.rowColor[row];
+          ctx.fillRect(col, row, 1, 1);
+        }
+        ctx.globalAlpha = 1;
+      };
+      stamp(r.cursor);
+      const hold = Math.min(skipped - 1, COLS - 1);
+      for (let i = 1; i <= hold; i++) stamp((r.cursor - i + COLS) % COLS);
     };
     ingest(useStore.getState().focus);
-    return useStore.subscribe((s, prev) => { if (s.focus !== prev.focus || s.focus) ingest(s.focus); });
+    return useStore.subscribe((s) => ingest(s.focus));
   }, [agentId, layout]);
 
   // composite at display rate
@@ -106,33 +123,40 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
       const ctx = cv.getContext('2d');
       if (!ctx) return;
       ctx.clearRect(0, 0, w, h);
-      // faint row-band guides at region boundaries are implied by colour; keep the ground clean.
       if (!r) return;
+      const now = performance.now();
+      const rctx = r.canvas.getContext('2d');
+      if (rctx) advance(r, rctx, now);          // keep scrolling even when no report arrives
       const colW = w / COLS;
-      const frac = reduce ? 0 : Math.min(1, (performance.now() - r.lastAt) / Math.max(16, r.interval));
-      // newest column sits at the right edge; shift left by the fraction of the next window elapsed
+      const frac = reduce ? 0 : Math.min(1, (now - r.colStart) / SLICE_MS);
       const shift = frac * colW;
-      ctx.imageSmoothingEnabled = false;
-      // ring layout: columns [cursor..COLS) are oldest, [0..cursor) newest
-      const oldest = COLS - r.cursor;          // number of columns in the first (older) segment
       const x0 = -shift;
-      if (oldest > 0) ctx.drawImage(r.canvas, r.cursor, 0, oldest, ROWS, x0, 0, oldest * colW, h);
-      if (r.cursor > 0) ctx.drawImage(r.canvas, 0, 0, r.cursor, ROWS, x0 + oldest * colW, 0, r.cursor * colW, h);
-      // soft glow on the freshest columns: redraw them blurred and brighter
-      const fresh = 5;
+      // drawn order: cursor+1 .. COLS-1 (oldest), then 0 .. cursor (newest, right edge)
+      const first = (r.cursor + 1) % COLS;
+      const nOld = COLS - first;
+      ctx.imageSmoothingEnabled = false;
+      if (first > 0) {
+        ctx.drawImage(r.canvas, first, 0, nOld, ROWS, x0, 0, nOld * colW, h);
+        ctx.drawImage(r.canvas, 0, 0, first, ROWS, x0 + nOld * colW, 0, first * colW, h);
+      } else {
+        ctx.drawImage(r.canvas, 0, 0, COLS, ROWS, x0, 0, COLS * colW, h);
+      }
+      // newest slices darker: redraw the last few with multiply so they read as "now"
+      const fresh = 4;
       const fx = x0 + (COLS - fresh) * colW;
       ctx.save();
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = 0.5;
-      ctx.filter = `blur(${2 * dpr}px)`;
-      if (r.cursor >= fresh) ctx.drawImage(r.canvas, r.cursor - fresh, 0, fresh, ROWS, fx, 0, fresh * colW, h);
-      else {
-        const a = fresh - r.cursor;
-        if (a > 0) ctx.drawImage(r.canvas, COLS - a, 0, a, ROWS, fx, 0, a * colW, h);
-        if (r.cursor > 0) ctx.drawImage(r.canvas, 0, 0, r.cursor, ROWS, fx + a * colW, 0, r.cursor * colW, h);
+      ctx.globalAlpha = 0.55;
+      for (let i = 0; i < fresh; i++) {
+        const col = (r.cursor - (fresh - 1) + i + COLS) % COLS;
+        ctx.drawImage(r.canvas, col, 0, 1, ROWS, fx + i * colW, 0, colW, h);
       }
       ctx.restore();
-      // write head: a thin amber scanline with a faint halo
+      // oldest history fades into the well
+      const fade = ctx.createLinearGradient(0, 0, w * 0.35, 0);
+      fade.addColorStop(0, 'rgba(255,253,248,.85)'); fade.addColorStop(1, 'rgba(255,253,248,0)');
+      ctx.fillStyle = fade; ctx.fillRect(0, 0, w * 0.35, h);
+      // write head: amber scanline with a faint halo
       const hx = Math.round(w - shift);
       const halo = ctx.createLinearGradient(hx - 10 * dpr, 0, hx, 0);
       halo.addColorStop(0, 'rgba(230,155,31,0)'); halo.addColorStop(1, 'rgba(230,155,31,.18)');
@@ -145,5 +169,5 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  return <canvas ref={canvasRef} className="raster" aria-label="Spike raster: neurons over time" role="img" />;
+  return <canvas ref={canvasRef} className="raster" aria-label="Spike raster: neurons over the last ten seconds" role="img" />;
 }

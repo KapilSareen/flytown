@@ -8,7 +8,7 @@ import { NI, type InjectTarget, type InputChannel, type Sex } from '../brain/typ
 import { setWorldApi, useStore, type Action, type CitizenView, type WorldApi } from '../store';
 import { createAgent, updateBody, type Agent } from './agent';
 import { loadBrain, type Brain } from './brainAdapter';
-import { buildCity, randomWalkable, rng, walkable, type City, type Pt } from './city';
+import { HASH_CELL, HASH_H, HASH_W, buildCity, bucketIndex, randomWalkable, rng, walkable, type City, type Pt } from './city';
 import { applyDriveProfile, updateDrives } from './drives';
 import { abortGoal, applyGoalProfile, riotChain, selectGoal, startGoal, thoughtOf, updateGoal } from './goals';
 import { findPath, lineOfSight } from './pathing';
@@ -26,9 +26,18 @@ export const WORLD = {
   maxSpeed: 80,               // px/s at pace 1
   turnRate: 5.0,              // rad/s toward the path
   nudgeRad: 0.26,             // +-15 degrees of brain steering on a stroll
-  publishHz: 12,
+  publishHz: 6,               // citizens snapshots (only when something visible changed)
+  scalarHz: 4,                // timeOfDay / day / fps / perf
+  maxStepsPerFrame: 3,        // catch-up cap: drop the remainder rather than spiral
   citizens: 14,
 };
+
+/** Per-phase timing of the world loop, ms per step (EMA) and per frame. Exposed as window.__world.perf. */
+export interface WorldPerf {
+  senses: number; brain: number; goals: number; move: number; collision: number; body: number;
+  stepTotal: number; publish: number; steps: number; frameMs: number; pathPlans: number;
+}
+const PERF_KEYS = ['senses', 'brain', 'goals', 'move', 'collision', 'body', 'stepTotal'] as const;
 
 export const POP = { frameBudgetMs: 8, perWorkerGuess: 10, hardMax: 200, mockMax: 60 };
 
@@ -46,6 +55,8 @@ export interface WorldState {
   /** True when the manifest's courtship readout is entirely male-only (silenced in female bodies). */
   femaleCourtshipSilenced: boolean;
   seatOwner: (number | null)[];            // occupant id per city.seats index
+  perf: WorldPerf;
+  hash: Agent[][];                         // citizens by 120 px bucket, rebuilt every step
   rand: () => number;
   inputsMap: Map<number, Float32Array>;   // loop scratch (kept here so stepWorld is callable headlessly)
 }
@@ -66,9 +77,12 @@ export async function startWorld(opts: { brain?: Brain; loop?: boolean; populati
     city, agents: [], brain: null, time: 0, hour: useStore.getState().timeOfDay, day: 1,
     daylight: daylightAt(useStore.getState().timeOfDay), fx: [], fps: 0, ready: false,
     femaleCourtshipSilenced: false, seatOwner: new Array<number | null>(city.seats.length).fill(null),
+    perf: { senses: 0, brain: 0, goals: 0, move: 0, collision: 0, body: 0, stepTotal: 0, publish: 0, steps: 0, frameMs: 0, pathPlans: 0 },
+    hash: Array.from({ length: HASH_W * HASH_H }, () => []),
     rand: rng(1234), inputsMap: new Map(),
   };
   world = w;
+  if (typeof window !== 'undefined') (window as unknown as { __world: { perf: WorldPerf; state: WorldState } }).__world = { perf: w.perf, state: w };
   const store = useStore.getState();
 
   const brain = opts.brain ?? await loadBrain((phase, progress) => useStore.getState().set({ loading: { phase, progress } }));
@@ -179,49 +193,92 @@ function setPopulation(w: WorldState, n: number, femaleRatio?: number) {
 // ---- main loop -----------------------------------------------------------------------
 function runLoop(w: WorldState) {
   let last = performance.now();
-  let acc = 0, fpsAcc = 0, fpsN = 0, publishAcc = 0, capAcc = 0;
+  let acc = 0, fpsAcc = 0, fpsN = 0, publishAcc = 0, scalarAcc = 0, capAcc = 0;
   const frame = (now: number) => {
     const real = Math.min(WORLD.maxFrameDt, (now - last) / 1000);
     last = now;
     fpsAcc += real; fpsN++;
     if (fpsAcc >= 0.5) { w.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
     const s = useStore.getState();
+    const t0 = performance.now();
     if (!s.paused) {
       acc += real * s.speed;
       let steps = 0;
-      while (acc >= WORLD.stepDt && steps < 12) { stepWorld(w, WORLD.stepDt, s.brainSpeed); acc -= WORLD.stepDt; steps++; }
-      if (steps === 12) acc = 0;
+      while (acc >= WORLD.stepDt && steps < WORLD.maxStepsPerFrame) { stepWorld(w, WORLD.stepDt, s.brainSpeed); acc -= WORLD.stepDt; steps++; }
+      if (acc >= WORLD.stepDt) acc = 0;          // behind by more than the cap: drop the remainder
     }
     publishAcc += real;
-    if (publishAcc >= 1 / WORLD.publishHz) { publishAcc = 0; publish(w); }
+    if (publishAcc >= 1 / WORLD.publishHz) {
+      publishAcc = 0;
+      const tp = performance.now(); publish(w); w.perf.publish = ema(w.perf.publish, performance.now() - tp, 0.2);
+    }
+    scalarAcc += real;
+    if (scalarAcc >= 1 / WORLD.scalarHz) { scalarAcc = 0; publishScalars(w); }
+    w.perf.frameMs = ema(w.perf.frameMs, performance.now() - t0, 0.1);
     capAcc += real;
     if (capAcc >= 2) {
       capAcc = 0;
       const cap = estimateCapacity(w, s.brainSpeed);
       if (Math.abs(cap - s.maxPopulation) > 2) s.set({ maxPopulation: cap });
     }
-    requestAnimationFrame(frame);
+    lastFrameAt = performance.now();
+    if (!viaWatchdog) requestAnimationFrame(frame);
   };
+  // Watchdog: browsers pause requestAnimationFrame when the tab is hidden or the window is
+  // occluded. The town keeps living at a low rate on a timer so time, hunger and events
+  // don't freeze while the user is looking elsewhere; rAF resumes normal pacing on return.
+  let lastFrameAt = performance.now();
+  let viaWatchdog = false;
+  setInterval(() => {
+    const t = performance.now();
+    if (t - lastFrameAt < 250) return;
+    viaWatchdog = true;
+    try { frame(t); } finally { viaWatchdog = false; }
+  }, 100);
   requestAnimationFrame(frame);
 }
+
+const ema = (prev: number, v: number, k: number) => prev + (v - prev) * k;
+
+// ---- spatial hash of citizens (120 px buckets) ----------------------------------------
+function rebuildHash(w: WorldState) {
+  for (const b of w.hash) b.length = 0;
+  for (const a of w.agents) w.hash[bucketIndex(a.x, a.y)].push(a);
+}
+const nearScratch: Agent[] = [];
+/** Citizens in the buckets covering the (x, y, r) disc. Returns a reused scratch array. */
+function nearAgents(w: WorldState, x: number, y: number, r: number): Agent[] {
+  nearScratch.length = 0;
+  const bx0 = Math.max(0, Math.floor((x - r) / HASH_CELL)), bx1 = Math.min(HASH_W - 1, Math.floor((x + r) / HASH_CELL));
+  const by0 = Math.max(0, Math.floor((y - r) / HASH_CELL)), by1 = Math.min(HASH_H - 1, Math.floor((y + r) / HASH_CELL));
+  for (let by = by0; by <= by1; by++) for (let bx = bx0; bx <= bx1; bx++) for (const a of w.hash[by * HASH_W + bx]) nearScratch.push(a);
+  return nearScratch;
+}
+const now = () => performance.now();
 
 /** Advance the world by dt seconds (one fixed step). Exported for headless tests. */
 export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
   const { inputsMap } = w;
+  const P = w.perf;
+  const tStart = now();
+  let t = tStart;
+  const lap = (key: (typeof PERF_KEYS)[number]) => { const n = now(); P[key] = ema(P[key], n - t, 0.05); t = n; };
   w.time += dt;
   w.hour += dt * WORLD.hoursPerSec;
   if (w.hour >= 24) { w.hour -= 24; w.day++; }
   w.daylight = daylightAt(w.hour);
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
+  rebuildHash(w);
+  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight, near: (x: number, y: number, r: number) => nearAgents(w, x, y, r) };
 
   // 1. Senses -> brain -> drives.
   for (const a of w.agents) {
-    senseInputs(ctx, a, a.inputs);
+    senseInputs(ctx, a, a.inputs, dt);
     let buf = inputsMap.get(a.id);
     if (!buf) { buf = new Float32Array(NI); inputsMap.set(a.id, buf); }
     buf.set(a.inputs);
   }
-  for (const id of [...inputsMap.keys()]) if (!w.agents.some(a => a.id === id)) inputsMap.delete(id);
+  if (inputsMap.size !== w.agents.length) for (const id of [...inputsMap.keys()]) if (!w.agents.some(a => a.id === id)) inputsMap.delete(id);
+  lap('senses');
   w.brain?.step(dt * 1000 * brainSpeed, inputsMap);
   for (const a of w.agents) {
     const o = w.brain?.getOutputs(a.id);
@@ -229,9 +286,12 @@ export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
     a.mood = clamp(a.mood + (w.rand() - 0.5) * 0.04 * Math.sqrt(dt) + (0.5 - a.mood) * 0.02 * dt, 0, 1);
     updateDrives(a, w.hour, w.daylight, dt, w.femaleCourtshipSilenced);
   }
+  lap('brain');
 
   // 2. Goals: select (hysteresis + commitment), run the active goal, then move.
+  let tGoals = 0, tMove = 0;
   for (const a of w.agents) {
+    const g0 = now();
     const prevAction = a.action;
     riotChain(w, a);
     selectGoal(w, a);
@@ -242,11 +302,14 @@ export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
     if (action !== prevAction) a.actionSince = w.time;
     a.action = action;
     a.actionT = w.time - a.actionSince;
+    const g1 = now(); tGoals += g1 - g0;
     moveAgent(w, a, dt);
     a.facing = a.face ? Math.atan2(a.face.y - a.y, a.face.x - a.x) : a.heading;
     a.speedNorm = clamp(Math.abs(a.speed) / WORLD.maxSpeed, 0, 2.5);
     if (a.godReceptive > 0 && w.time > a.godReceptive) a.godReceptive = 0;
+    tMove += now() - g1;
   }
+  P.goals = ema(P.goals, tGoals, 0.05); P.move = ema(P.move, tMove, 0.05); t = now();
 
   // 3. Bond expiry, separation, body.
   for (const a of w.agents) {
@@ -257,7 +320,14 @@ export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
     }
   }
   separate(w);
-  for (const a of w.agents) updateBody(a, dt, w.daylight, a.action === 'walk' ? Math.abs(a.speed) * dt : 0);
+  lap('collision');
+  for (const a of w.agents) {
+    stuckCheck(w, a, dt);
+    updateBody(a, dt, w.daylight, a.action === 'walk' ? Math.abs(a.speed) * dt : 0);
+  }
+  lap('body');
+  P.stepTotal = ema(P.stepTotal, now() - tStart, 0.05);
+  P.steps++;
 }
 
 // ---- locomotion ----------------------------------------------------------------------
@@ -344,20 +414,26 @@ function moveAgent(w: WorldState, a: Agent, dt: number) {
   a.vx = (a.x - ox) / dt;
   a.vy = (a.y - oy) / dt;
 
-  // stuck detection on paths: re-plan once, then give up
-  if (m.mode === 'path' && speed > 0) {
-    if (Math.hypot(a.x - ox, a.y - oy) < speed * dt * 0.3) a.stuckFor += dt; else a.stuckFor = Math.max(0, a.stuckFor - dt);
-    if (a.stuckFor > 1.0) {
-      a.stuckFor = 0; a.path = null; a.pathTarget = null;
-      if ((a.cooldown.replan ?? -1e9) > w.time - 4) { a.arrived = true; a.motion = { mode: 'stand' }; }
-      a.cooldown.replan = w.time;
-    }
+  a.px = ox; a.py = oy;   // stuck detection happens after collision resolution (see stuckCheck)
+}
+
+/** After collision: a path-follower that made no real progress for 1 s re-plans, and gives up if blocked again within 4 s. */
+function stuckCheck(w: WorldState, a: Agent, dt: number) {
+  const m = a.motion;
+  if (m.mode !== 'path' || a.speed <= 0) { a.stuckFor = 0; return; }
+  const moved = Math.hypot(a.x - a.px, a.y - a.py);
+  if (moved < a.speed * dt * 0.3) a.stuckFor += dt; else a.stuckFor = Math.max(0, a.stuckFor - dt);
+  if (a.stuckFor > 1.0) {
+    a.stuckFor = 0; a.path = null; a.pathTarget = null;
+    if ((a.cooldown.replan ?? -1e9) > w.time - 4) { a.arrived = true; a.motion = { mode: 'stand' }; }
+    a.cooldown.replan = w.time;
   }
 }
 
 /** Current waypoint toward `target`, planning lazily (and re-planning when the target moves). */
 function nextWaypoint(w: WorldState, a: Agent, target: Pt): Pt | null {
   if (!a.path || !a.pathTarget || dist(a.pathTarget, target) > 12) {
+    w.perf.pathPlans++;
     a.path = findPath(w.city, a, target);
     a.pathTarget = { x: target.x, y: target.y };
     a.pathIdx = 0;
@@ -372,7 +448,7 @@ function nextWaypoint(w: WorldState, a: Agent, target: Pt): Pt | null {
 function sidestep(w: WorldState, a: Agent, desired: number): number {
   const cx = Math.cos(desired), cy = Math.sin(desired);
   let turn = 0;
-  for (const o of w.agents) {
+  for (const o of nearAgents(w, a.x, a.y, 34)) {
     if (o === a) continue;
     const dx = o.x - a.x, dy = o.y - a.y;
     const d = Math.hypot(dx, dy);
@@ -392,8 +468,10 @@ function separate(w: WorldState) {
   const ag = w.agents;
   for (let iter = 0; iter < 2; iter++) {
     for (let i = 0; i < ag.length; i++) {
-      for (let j = i + 1; j < ag.length; j++) {
-        const a = ag[i], b = ag[j];
+      const a = ag[i];
+      const cand = nearAgents(w, a.x, a.y, 24).slice();   // copy: the scratch is reused inside the loop
+      for (const b of cand) {
+        if (b.id <= a.id) continue;                        // each pair once
         let dx = b.x - a.x, dy = b.y - a.y;
         let d = Math.hypot(dx, dy);
         if (d < 1e-3) { dx = 1; dy = 0; d = 1; }
@@ -417,7 +495,7 @@ const BODY_R = 8;   // body radius against props (a little smaller than the citi
 /** Push the citizen out of any obstacle it penetrates. Seated diners ignore their own table. */
 function clampToObstacles(w: WorldState, a: Agent) {
   const mySeat = a.seat !== null ? w.city.seats[a.seat] : null;
-  for (const o of w.city.obstacles) {
+  for (const o of w.city.obstacleBuckets[bucketIndex(a.x, a.y)]) {
     if (o.kind === 'circle') {
       if (o.tag === 'table' && mySeat && o.venue === mySeat.venue && o.table === mySeat.table) continue;
       const dx = a.x - o.x, dy = a.y - o.y;
@@ -442,26 +520,61 @@ function clampToObstacles(w: WorldState, a: Agent) {
 
 // ---- store publishing ----------------------------------------------------------------
 let lastFocusId: number | null | undefined = undefined;
+let lastFocus: unknown = null;
+// CitizenView objects are cached per citizen and rebuilt only when something visible changed,
+// so memoized HUD rows keep their reference. inputs/outputs are copied only for the selected
+// citizen (everyone else shares an empty buffer); drives are a fresh small object when changed.
+const EMPTY_NI = new Float32Array(NI);
+const EMPTY_NO = new Float32Array(12);
+const viewCache = new Map<number, { key: string; view: CitizenView }>();
+const selBufs = { inputs: new Float32Array(NI), outputs: new Float32Array(12) };
+const r2 = (v: number) => Math.round(v * 100);
+const r20 = (v: number) => Math.round(v * 20);
+
 function publish(w: WorldState) {
   const s = useStore.getState();
   if (s.selectedId !== lastFocusId) { lastFocusId = s.selectedId; w.brain?.focus(s.selectedId); }
+  let changed = s.citizens.length !== w.agents.length;
   const citizens: CitizenView[] = w.agents.map(a => {
+    const selected = a.id === s.selectedId;
     a.thought = thoughtOf(w, a);
-    return {
+    const d = a.drives, b = a.body;
+    const key = `${Math.round(a.x)},${Math.round(a.y)},${r20(a.heading)},${a.action},${a.actionPhase},${a.goal?.name ?? 'idle'},${a.bondWith},${a.target},` +
+      `${r2(b.hunger)},${r2(b.dust)},${r2(b.energy)},${r2(b.injury)},${r20(a.speedNorm)},${r20(a.facing)},${Math.round(a.actionT * 4)},${a.thought},${selected},` +
+      `${r20(d.hunger)},${r20(d.cleanliness)},${r20(d.romance)},${r20(d.hostility)},${r20(d.fear)},${r20(d.fatigue)},${r20(d.social)}`;
+    const c = viewCache.get(a.id);
+    if (c && c.key === key && !selected) return c.view;
+    changed = true;
+    let inputs: Float32Array = EMPTY_NI, outputs: Float32Array = EMPTY_NO;
+    if (selected) { selBufs.inputs.set(a.inputs); selBufs.outputs.set(a.outputs); inputs = selBufs.inputs; outputs = selBufs.outputs; }
+    const view: CitizenView = {
       id: a.id, name: a.name, sex: a.sex, x: a.x, y: a.y, heading: a.heading, action: a.action,
       goal: a.goal?.name ?? 'idle',
       actionT: a.actionT, actionPhase: a.actionPhase, speedNorm: a.speedNorm, facing: a.facing,
-      hunger: a.body.hunger, dust: a.body.dust, energy: a.body.energy, injury: a.body.injury,
-      bondWith: a.bondWith, target: a.target, inputs: a.inputs.slice(), outputs: a.outputs.slice(),
-      drives: { ...a.drives }, thought: a.thought, palette: a.palette,
+      hunger: b.hunger, dust: b.dust, energy: b.energy, injury: b.injury,
+      bondWith: a.bondWith, target: a.target, inputs, outputs,
+      drives: { ...d }, thought: a.thought, palette: a.palette,
     };
+    viewCache.set(a.id, { key, view });
+    return view;
   });
+  if (viewCache.size > w.agents.length + 8) for (const id of [...viewCache.keys()]) if (!w.agents.some(a => a.id === id)) viewCache.delete(id);
   const focus = w.brain?.latestFocus ?? null;
-  s.set({
-    citizens, timeOfDay: w.hour, day: w.day, fps: Math.round(w.fps),
-    perf: w.brain?.perf ?? null,
-    focus: focus && focus.agentId === s.selectedId ? focus : null,
-  });
+  const focusOut = focus && focus.agentId === s.selectedId ? focus : null;
+  const patch: Partial<Parameters<typeof s.set>[0]> = {};
+  if (changed) patch.citizens = citizens;
+  if (focusOut !== lastFocus) { lastFocus = focusOut; patch.focus = focusOut; }
+  if (Object.keys(patch).length) s.set(patch);
+}
+
+/** Cheap scalars at a low rate, in their own store update. */
+function publishScalars(w: WorldState) {
+  const s = useStore.getState();
+  const fps = Math.round(w.fps);
+  const p = w.brain?.perf ?? null;
+  // the pool mutates its perf object in place: publish a fresh copy when its numbers moved
+  const perf = p && (!s.perf || s.perf.msPerSimMs !== p.msPerSimMs || s.perf.activeNeurons !== p.activeNeurons || s.perf.agents !== p.agents) ? { ...p } : s.perf;
+  if (s.timeOfDay !== w.hour || s.day !== w.day || s.fps !== fps || s.perf !== perf) s.set({ timeOfDay: w.hour, day: w.day, fps, perf });
 }
 
 // ---- WorldApi ------------------------------------------------------------------------

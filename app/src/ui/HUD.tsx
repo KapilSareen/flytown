@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { Profiler, useEffect, type ProfilerOnRenderCallback } from 'react';
 import { useStore } from '../store';
 import { useUi } from './uiStore';
 import { TopBar } from './TopBar';
@@ -11,6 +11,7 @@ import { LoadingScreen } from './LoadingScreen';
 import { About } from './About';
 import { installDevMock } from './devMock';
 import { castTownPower } from './townPowers';
+import { cycleFollow, followAuto } from './followPick';
 import './hud.css';
 
 const SPEED_KEYS: Record<string, number> = { '1': 0.5, '2': 1, '3': 2, '4': 4 };
@@ -27,7 +28,9 @@ function useHotkeys() {
       const api = s.worldApi;
       if (!api) return;
       if (e.key === ' ') { e.preventDefault(); api.setPaused(!s.paused); return; }
-      if (e.key === 'f' || e.key === 'F') { if (s.selectedId !== null) api.follow(s.selectedId); return; }
+      if (e.key === 'f' || e.key === 'F') { followAuto(); return; }
+      if (e.key === ']') { cycleFollow(1); return; }
+      if (e.key === '[') { cycleFollow(-1); return; }
       if (e.key === 'Escape') {
         const ui = useUi.getState();
         if (ui.aboutOpen) { ui.setAboutOpen(false); return; }
@@ -52,12 +55,18 @@ function Flash() {
   return <div key={flash.n} className={`flash ${flash.tone}`} aria-hidden />;
 }
 
+// Dev profiling hook: when `window.__hudCommits` is an array, every commit's actual render
+// duration is pushed to it (a no-op in production builds, where Profiler is inert).
+declare global { interface Window { __hudCommits?: number[] } }
+const onRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration) => { window.__hudCommits?.push(actualDuration); };
+
 export function HUD() {
   const ready = useStore((s) => s.ready);
   useHotkeys();
   useEffect(() => { installDevMock(); }, []);
 
   return (
+    <Profiler id="hud" onRender={onRender}>
     <div className="hud" data-theme="light">
       {!ready && <LoadingScreen />}
       {ready && (
@@ -73,6 +82,7 @@ export function HUD() {
       )}
       <About />
     </div>
+    </Profiler>
   );
 }
 

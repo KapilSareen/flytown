@@ -30,7 +30,7 @@ export const GOAL = {
   checkEvery: 0.5, switchMargin: 0.15,
   commit: { wander: 8, eatOut: 40, groom: 6, court: 20, courted: 20, bond: 30, confront: 15, flee: 2.5, rest: 40, chat: 8, bar: 30, festival: 30 } as Record<GoalName, number>,
   festivalSeconds: 30, danceBpm: 120,
-  hungerOn: 0.55, cleanOn: 0.5, fatigueOn: 0.6, romanceOn: 0.35, hostileOn: 0.3, socialOn: 0.4, barOn: 0.5, fearOn: 0.65,
+  hungerOn: 0.55, cleanOn: 0.5, fatigueOn: 0.6, romanceOn: 0.35, hostileOn: 0.3, socialOn: 0.4, barOn: 0.5, fearOn: 0.5,
   receptive: 0.25,
   courtRange: 220, confrontRange: 100, chatRange: 120,
   cooldown: { eatOut: 20, groom: 60, court: 60, courted: 20, fight: 90, flee: 3, rest: 30, chat: 30, bar: 40 },
@@ -42,7 +42,7 @@ export const GOAL = {
 
 /** Real-kernel profile: hostile/romance onsets a bit lower (their drives are boosted in drives.ts). */
 export function applyGoalProfile(kind: 'mock' | 'lif') {
-  if (kind === 'lif') Object.assign(GOAL, { hostileOn: 0.25, romanceOn: 0.3, receptive: 0.22 });
+  if (kind === 'lif') Object.assign(GOAL, { hostileOn: 0.2, romanceOn: 0.3, receptive: 0.22 });
 }
 
 const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -67,7 +67,8 @@ function pose(a: Agent, action: Action, phase: string) { a.action = action; a.ac
 const at = (a: Agent) => ({ x: a.x, y: a.y });
 
 /** Can this citizen be pulled into someone else's goal right now? */
-export const interruptible = (a: Agent) => !a.goal || a.goal.name === 'wander' || (a.goal.name === 'bar' && a.goal.phase === 'hangOut');
+export const interruptible = (a: Agent) => !a.goal || a.goal.name === 'wander' || (a.goal.name === 'bar' && a.goal.phase === 'hangOut')
+  || (a.goal.name === 'eatOut' && (a.goal.phase === 'linger' || a.goal.phase === 'leave')) || (a.goal.name === 'chat' && !a.goal.forced);
 const cd = (w: WorldState, a: Agent, k: string) => (a.cooldown[k] ?? 0) <= w.time;
 
 function nearestWhere(w: WorldState, a: Agent, pred: (o: Agent) => boolean, r: number): Agent | null {
@@ -152,9 +153,12 @@ export function candidates(w: WorldState, a: Agent): Cand[] {
 /** Periodic goal selection with hysteresis and commitment; fear interrupts. */
 export function selectGoal(w: WorldState, a: Agent) {
   const now = w.time;
-  // Interrupt: fear (looming / attacked) wins immediately unless already fleeing or scripted.
-  if (a.drives.fear > GOAL.fearOn && cd(w, a, 'flee') && !(a.goal?.name === 'flee') && !(a.goal?.forced)) {
-    const threat = a.threat ?? { x: a.x - Math.cos(a.heading) * 20, y: a.y - Math.sin(a.heading) * 20 };
+  // Interrupt: fear (a genuine loom / being attacked) must stay above threshold for 0.4 s;
+  // then it wins immediately unless already fleeing or scripted. God scare/panic bypass this.
+  a.fearFor = a.drives.fear > GOAL.fearOn ? a.fearFor + 1 / 60 : 0;   // called every 60 Hz step
+  if (a.fearFor >= 0.4 && cd(w, a, 'flee') && !(a.goal?.name === 'flee') && !(a.goal?.forced)) {
+    const from = a.threatId !== null ? byId(w, a.threatId) : null;
+    const threat = from ? at(from) : a.threat ?? { x: a.x - Math.cos(a.heading) * 20, y: a.y - Math.sin(a.heading) * 20 };
     startGoal(w, a, 'flee', { threat, score: a.drives.fear });
     return;
   }
@@ -229,7 +233,13 @@ function init(w: WorldState, a: Agent) {
       g.phase = 'dash'; g.phaseUntil = now + GOAL.dashSeconds;
       a.threat = g.threat ?? a.threat ?? { x: a.x - 10, y: a.y };
       a.motion = { mode: 'dash', from: a.threat, pace: GOAL.pace.dash };
-      throttled(w, a, 'flee', 8, 'escape', `${a.name} bolts.`, [a.id]);
+      {
+        const from = a.threatId !== null ? byId(w, a.threatId) : null;
+        const lines = from
+          ? [`${a.name} bolts from ${from.name}.`, `${a.name} flinches and runs from ${from.name}.`, `${a.name} scrambles away from ${from.name}.`]
+          : [`${a.name} flinches and runs.`, `${a.name} bolts.`, `${a.name} takes off in a hurry.`];
+        throttled(w, a, 'flee', 20, 'escape', lines[Math.floor(w.rand() * lines.length)], from ? [a.id, from.id] : [a.id]);
+      }
       break;
     }
     case 'rest': {
@@ -376,7 +386,7 @@ export function updateGoal(w: WorldState, a: Agent, dt: number) {
         if (now >= g.phaseUntil) { g.phase = 'lookBack'; g.phaseUntil = now + GOAL.lookBackSeconds; stand(a, a.threat); }
       } else {
         pose(a, 'idle', 'lookBack');
-        if (now >= g.phaseUntil) { a.threat = null; endGoal(w, a, 'flee', GOAL.cooldown.flee); }
+        if (now >= g.phaseUntil) { a.threat = null; a.threatId = null; a.fearFor = 0; endGoal(w, a, 'flee', GOAL.cooldown.flee); }
       }
       break;
     }

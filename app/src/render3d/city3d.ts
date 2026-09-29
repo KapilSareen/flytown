@@ -559,9 +559,9 @@ function buildCafe(b: Building, city: City, flat: GeoBuilder, facet: GeoBuilder,
   }
   for (const [ti, tp] of tables) {
     tableAt(flat, tp.x, tp.y, ti);
-    flat.add(G.cyl, 0x8a8f96, tp.x, 2 + 14 + 10, tp.y, [0, 0, 0], [0.8, 20, 0.8]);       // parasol pole through the table
-    facet.add(G.cone, ti % 2 ? 0xd9563f : 0xe4b04a, tp.x, 2 + 36.5, tp.y, [0, 0, 0], [17, 6, 17]);
-    flat.add(G.sphere, 0xe9e2d2, tp.x, 2 + 40, tp.y, [0, 0, 0], [1, 1, 1]);
+    flat.add(G.cyl, 0x8a8f96, tp.x, 2 + 14 + 9, tp.y, [0, 0, 0], [0.8, 18, 0.8]);        // parasol pole through the table
+    facet.add(G.cone, ti % 2 ? 0xd9563f : 0xe4b04a, tp.x, 2 + 33.5, tp.y, [0, 0, 0], [12.5, 5, 12.5]);
+    flat.add(G.sphere, 0xe9e2d2, tp.x, 2 + 36.5, tp.y, [0, 0, 0], [1, 1, 1]);
   }
   // a chalkboard sign
   box(flat, 0x2b2b2b, t.x + 40, 2, t.y + 8, 8, 12, 1.2);

@@ -29,7 +29,8 @@ const CARDS = [
         <p>Click a citizen to open their brain. Double-click to follow them. Use the dock at the bottom to play god.</p>
         <div className="keys">
           <span className="kbd">Space</span><span>pause and resume</span>
-          <span className="kbd">F</span><span>follow the selected citizen</span>
+          <span className="kbd">F</span><span>follow someone (again for the next one)</span>
+          <span className="kbd">[ ]</span><span>previous / next citizen</span>
           <span className="kbd">Esc</span><span>back to god view</span>
           <span className="kbd">1–4</span><span>world speed</span>
         </div>

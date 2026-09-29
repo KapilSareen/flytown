@@ -43,6 +43,7 @@ export interface Agent {
   face: Pt | null;              // when standing, turn toward this point
   arrived: boolean;             // set by moveAgent when a path/direct motion reached its target
   path: Pt[] | null; pathIdx: number; pathTarget: Pt | null; stuckFor: number;
+  px: number; py: number;       // position at the start of the step (stuck detection after collision)
   cooldown: Record<string, number>;
 
   action: Action;
@@ -60,6 +61,9 @@ export interface Agent {
   godReceptive: number;         // god.love: receptive until this time
   riotUntil: number;            // god.riot: keeps picking fights with anyone nearby until this time
   provoked: number;             // 0..1, rises while another male stays close (odorMale), feeds hostility
+  loomFor: number;              // seconds a genuine looming threat has persisted (senses.ts)
+  fearFor: number;              // seconds the fear drive has been above the flee threshold
+  threatId: number | null;      // who we are fleeing from, if a citizen
   godFeedUntil: number;
 
   singHeardUntil: number;       // soundSong input while > now
@@ -119,9 +123,9 @@ export function createAgent(id: number, sex: Sex, pos: Pt, home: Pt, rand: () =>
     drives: { hunger: 0, cleanliness: 0, romance: 0, hostility: 0, fear: 0, fatigue: 0, social: 0, wander: 0.3 },
     mood: rand(),
     goal: null, lastGoalCheck: -1, motion: { mode: 'stand' }, face: null, arrived: false,
-    path: null, pathIdx: 0, pathTarget: null, stuckFor: 0, cooldown: {},
+    path: null, pathIdx: 0, pathTarget: null, stuckFor: 0, px: pos.x, py: pos.y, cooldown: {},
     action: 'idle', actionSince: now, actionT: 0, actionPhase: 'idle', speedNorm: 0, facing: heading,
-    target: null, bondWith: null, bondUntil: 0, threat: null, hurtUntil: 0, godReceptive: 0, riotUntil: 0, provoked: 0, godFeedUntil: 0,
+    target: null, bondWith: null, bondUntil: 0, threat: null, hurtUntil: 0, godReceptive: 0, riotUntil: 0, provoked: 0, loomFor: 0, fearFor: 0, threatId: null, godFeedUntil: 0,
     singHeardUntil: 0, singFrom: null, seat: null, lastEventAt: {},
     palette: { ...pick(rand, PALETTES) },
     hairStyle: pick(rand, HAIR_STYLES[sex]),

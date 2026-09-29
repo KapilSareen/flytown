@@ -107,6 +107,7 @@ export class Character3D {
   hunger: THREE.Sprite;
   private hungerCanvas: HTMLCanvasElement;
   private hungerShown = -1;
+  private barColor = '';
   ring: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   aura: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
   streak: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -273,7 +274,7 @@ export class Character3D {
    * @param dt real seconds; @param animDt world-scaled seconds (0 when paused)
    * @param groundY feet height at the agent's cell; @param camDist camera distance (label scale)
    */
-  update(a: AgentLike, worldTime: number, dt: number, animDt: number, groundY: number, selected: boolean, followed: boolean, camDist: number, seat: SeatKind = 'none', hovered = false) {
+  update(a: AgentLike, worldTime: number, dt: number, animDt: number, groundY: number, selected: boolean, followed: boolean, camDist: number, seat: SeatKind = 'none', hovered = false, labelOk = true) {
     dt = Math.max(0, dt); animDt = Math.max(0, animDt);
     const frozen = this.hitStop > 0;
     if (frozen) this.hitStop -= dt; else this.t += animDt;
@@ -308,7 +309,7 @@ export class Character3D {
         else this.eatPose(T, seat === 'stand');
         break;
       case 'groom': this.groomPose(T); break;
-      case 'sing': this.singPose(T); break;
+      case 'sing': this.singPose(T, phase === 'talk'); break;
       case 'fight': this.fightPose(T, actionT, phase, phaseT, w); rate = 22; break;
       case 'hurt': this.hurtPose(T, actionT); rate = 24; break;
       case 'escape': this.escapePose(T, phase ? phase === 'crouch' : actionT < 0.16, w); rate = 20; break;
@@ -317,12 +318,17 @@ export class Character3D {
         else this.sleepPose(T);
         rate = 6; break;
       default:
-        if (phase === 'sit' && seat === 'chair') this.sitPose(T, false);
+        if ((phase === 'sit' && seat === 'chair') || phase === 'sitTogether') this.sitPose(T, false);
         else if (phase === 'sit' && seat === 'stand') this.browsePose(T);
         else if (phase === 'listen') this.listenPose(T);
         else if (phase === 'bond') this.bondPose(T);
         else if (phase === 'strut') this.strutPose(T, w);
         else if (phase === 'dance') this.dancePose(T);
+        else if (phase === 'squareUp') this.fightPose(T, actionT, 'stare', phaseT, 0);
+        else if (phase === 'hangOut') this.hangOutPose(T);
+        else if (phase === 'turnedDown') this.turnedDownPose(T);
+        else if (phase === 'lookBack') this.lookBackPose(T);
+        else if (phase === 'lookAround') { this.idlePose(T, 0); T[J.headRY] = 0.8 * Math.sin(this.t * 0.9 + this.seed); T[J.spineRY] = 0.25 * Math.sin(this.t * 0.9 + this.seed); }
         else { this.idlePose(T, w); if (w > 0.05) this.walkPose(T, w, run); }
     }
     // a landed blow (or punish) flashes the body red
@@ -351,35 +357,40 @@ export class Character3D {
     const auraColor = a.action === 'fight' || a.action === 'hurt' ? 0xff3b2f : social ? 0xff6f9c : a.action === 'sleep' ? 0x6f8fe0 : 0;
     if (auraColor) {
       this.aura.visible = true; this.aura.material.color.set(auraColor);
-      this.aura.material.opacity = (a.action === 'sleep' ? 0.12 : 0.22) + 0.08 * Math.sin(this.t * 6);
+      this.aura.material.opacity = (a.action === 'sleep' ? 0.1 : social ? 0.11 : 0.2) + (social ? 0.04 : 0.08) * Math.sin(this.t * 6);
+      const ar = social ? 0.8 : 1; this.aura.scale.set(ar, ar, 1);
     } else this.aura.visible = false;
     const streaking = a.action === 'escape' && (phase === 'dash' || speedAbs > 60);
     this.streak.visible = streaking;
     if (streaking) this.streak.material.opacity = 0.35 + 0.15 * Math.sin(this.t * 30);
-    const hungerOn = selected || followed;
-    if (hungerOn !== this.hunger.visible) this.hunger.visible = hungerOn;
-    if (hungerOn) {
-      const h = a.body.hunger;
-      if (Math.abs(h - this.hungerShown) > 0.02) this.drawHunger(h);
-      const s = Math.max(16, camDist * 0.042) / this.sexScale;
+    // bar: injury (red) while fighting, hunger (green->red) when selected / followed
+    const fighting = a.action === 'fight' || a.action === 'hurt';
+    const barOn = labelOk && (fighting || selected || followed);
+    if (barOn !== this.hunger.visible) this.hunger.visible = barOn;
+    if (barOn) {
+      const v = fighting ? 1 - a.body.injury : 1 - a.body.hunger;
+      const col = fighting ? '#e5533d' : a.body.hunger > 0.7 ? '#e5533d' : a.body.hunger > 0.45 ? '#e9a23b' : '#7fb04a';
+      if (Math.abs(v - this.hungerShown) > 0.02 || col !== this.barColor) this.drawBar(v, col);
+      const s = Math.max(16, camDist * 0.038) / this.sexScale;
       this.hunger.scale.set(s * 1.4, s * 0.175, 1);
     }
-    const labelOn = selected || followed || camDist < 480;
+    const labelOn = labelOk && (selected || followed || camDist < 520);
     this.label.visible = labelOn;
     if (labelOn) {
-      const s = Math.max(16, camDist * 0.042) / this.sexScale;
+      const s = Math.max(16, camDist * 0.038) / this.sexScale;
       this.label.scale.set(s * this.labelAspect * 0.5, s * 0.5, 1);
-      this.label.material.opacity = selected || followed ? 1 : Math.min(1, (480 - camDist) / 120);
+      const fade = Math.min(1, (camDist - 60) / 50);
+      this.label.material.opacity = (selected || followed ? 1 : Math.min(1, (520 - camDist) / 160)) * fade;
     }
   }
 
-  private drawHunger(h: number) {
-    this.hungerShown = h;
+  private drawBar(v: number, color: string) {
+    this.hungerShown = v; this.barColor = color;
     const ctx = this.hungerCanvas.getContext('2d')!;
     ctx.clearRect(0, 0, 64, 8);
     ctx.fillStyle = 'rgba(14,16,22,0.7)'; ctx.beginPath(); ctx.roundRect(0, 0, 64, 8, 4); ctx.fill();
-    const w = Math.max(2, Math.round(60 * (1 - h)));
-    ctx.fillStyle = h > 0.7 ? '#e5533d' : h > 0.45 ? '#e9a23b' : '#7fb04a';
+    const w = Math.max(2, Math.round(60 * Math.max(0, Math.min(1, v))));
+    ctx.fillStyle = color;
     ctx.beginPath(); ctx.roundRect(2, 2, w, 4, 2); ctx.fill();
     (this.hunger.material.map as THREE.Texture).needsUpdate = true;
   }
@@ -538,9 +549,42 @@ export class Character3D {
     T[J.hipsZ] = 0.5 * c;
   }
 
-  private singPose(T: Float32Array) {
+  /** Leaning on a wall at the bar: weight on one hip, arms crossed, idly looking about. */
+  private hangOutPose(T: Float32Array) {
     const t = this.t, s = this.seed;
     this.idlePose(T, 0);
+    T[J.spineRZ] = 0.08; T[J.hipsZ] = 2 + 0.6 * Math.sin(t * 0.5 + s); T[J.hipsRX] = 0.08; T[J.thLX] = 0.15; T[J.thRX] = 0.05;
+    T[J.uaLZ] = T[J.uaRZ] = 0.55; T[J.uaLX] = -0.45; T[J.uaRX] = 0.45; T[J.faLZ] = T[J.faRZ] = 2.0;
+    T[J.headRY] = 0.5 * Math.sin(t * 0.45 + s); T[J.headRZ] = 0.05;
+  }
+
+  /** Rejected: head down, shoulders slumped, limp arms, a slow sway. */
+  private turnedDownPose(T: Float32Array) {
+    const t = this.t, s = this.seed;
+    this.idlePose(T, 0);
+    T[J.spineRZ] = -0.18; T[J.headRZ] = -0.42; T[J.headRY] = 0.15 * Math.sin(t * 0.7 + s);
+    T[J.uaLZ] = T[J.uaRZ] = -0.05; T[J.uaLX] = 0.04; T[J.uaRX] = -0.04; T[J.faLZ] = T[J.faRZ] = 0.05;
+    T[J.hipsZ] = 0.8 * Math.sin(t * 0.7 + s); T[J.hipsY] = -0.8;
+  }
+
+  /** After a flight: turned half round, looking back over the shoulder. */
+  private lookBackPose(T: Float32Array) {
+    const t = this.t, s = this.seed;
+    this.idlePose(T, 0);
+    const side = Math.sign(Math.sin(s));
+    T[J.spineRY] = 0.45 * side; T[J.headRY] = (0.75 + 0.15 * Math.sin(t * 1.5 + s)) * side; T[J.spineRZ] = -0.06;
+    T[J.uaLX] = 0.2; T[J.uaRX] = -0.2; T[J.faLZ] = T[J.faRZ] = 0.5; T[J.spineS] = 1 + 0.035 * Math.sin(t * 3 + s);   // catching breath
+  }
+
+  private singPose(T: Float32Array, talk = false) {
+    const t = this.t, s = this.seed;
+    this.idlePose(T, 0);
+    if (talk) {   // conversation: small hand gestures, nods
+      T[J.headRZ] = 0.05 + 0.06 * Math.sin(t * 2.3 + s); T[J.headRY] = 0.12 * Math.sin(t * 1.1 + s);
+      T[J.uaRZ] = 0.5 + 0.25 * Math.sin(t * 2.7 + s); T[J.uaRX] = -0.2; T[J.faRZ] = 1.6 + 0.3 * Math.sin(t * 5.1 + s);
+      T[J.uaLZ] = 0.3; T[J.uaLX] = 0.2; T[J.faLZ] = 1.2 + 0.2 * Math.sin(t * 3.7 + s);
+      return;
+    }
     T[J.spineRZ] = 0.14; T[J.spineS] = 1.04 + 0.025 * Math.sin(t * 5 + s);
     T[J.headRZ] = 0.2; T[J.headRY] = 0.28 * Math.sin(t * 2.1 + s); T[J.headRX] = 0.1 * Math.sin(t * 1.3 + s);
     T[J.uaLZ] = 0.9 + 0.5 * Math.sin(t * 2.5 + s); T[J.uaLX] = 0.55; T[J.faLZ] = 1.2 + 0.2 * Math.sin(t * 5 + s);
@@ -560,15 +604,22 @@ export class Character3D {
   /** Phase-driven when the world provides phases (approach/guard/strike/recoil/stagger); a timed loop otherwise. */
   private fightPose(T: Float32Array, actionT: number, phase: string, phaseT: number, w: number) {
     this.guardPose(T);
-    if (phase === 'flee') { this.escapePose(T, false, w); return; }
+    if (phase === 'flee') {   // the loser bolts: full run, arms flailing wide, glancing back
+      this.escapePose(T, false, Math.max(w, 0.8));
+      T[J.uaLX] = 0.75; T[J.uaRX] = -0.75; T[J.faLZ] = T[J.faRZ] = 0.9; T[J.headRY] = 0.5 * Math.sin(this.t * 1.3); T[J.spineRZ] = -0.3;
+      return;
+    }
+    if (phase === 'stagger') { this.staggerPose(T, phaseT); return; }
     if (phase === 'approach' || phase === 'circle' || (!phase && w > 0.1)) {
       this.walkPose(T, Math.max(w, 0.3), 0.4); T[J.uaLZ] = T[J.uaRZ] = 0.85; T[J.faLZ] = T[J.faRZ] = 2.2; T[J.spineRZ] = -0.2;
       return;
     }
-    if (phase === 'stare') {     // squared up: chin down, fists up, slow menacing bob
-      const t = this.t;
-      T[J.spineRZ] = -0.22; T[J.headRZ] = -0.12; T[J.hipsY] = -2.2 + 0.6 * Math.sin(t * 2.2); T[J.hipsRY] = 0.12 * Math.sin(t * 1.1);
-      T[J.uaLZ] = T[J.uaRZ] = 0.95; T[J.faLZ] = T[J.faRZ] = 2.35; T[J.uaLX] = 0.05; T[J.uaRX] = -0.05;
+    if (phase === 'stare') {     // squared up: chin down, fists up, weight shifting, fists pumping
+      const t = this.t, s = this.seed;
+      T[J.spineRZ] = -0.22; T[J.headRZ] = -0.12; T[J.headRY] = 0.08 * Math.sin(t * 1.7 + s);
+      T[J.hipsY] = -2.2 + 0.6 * Math.sin(t * 2.2 + s); T[J.hipsRY] = 0.12 * Math.sin(t * 1.1 + s); T[J.hipsZ] = 1.6 * Math.sin(t * 0.9 + s); T[J.hipsRX] = 0.05 * Math.sin(t * 0.9 + s);
+      T[J.uaLZ] = 0.95 + 0.08 * Math.sin(t * 3 + s); T[J.uaRZ] = 0.95 - 0.08 * Math.sin(t * 3 + s);
+      T[J.faLZ] = 2.35 + 0.1 * Math.sin(t * 3.3 + s); T[J.faRZ] = 2.35 - 0.1 * Math.sin(t * 3.3 + s); T[J.uaLX] = 0.05; T[J.uaRX] = -0.05;
       return;
     }
     const right = this.strikes % 2 === 0;
@@ -585,7 +636,7 @@ export class Character3D {
     switch (phase) {
       case 'strike': { const k = phaseT / 0.25; if (k < 0.4) windup(smooth01(k / 0.4)); else punch(smooth01((k - 0.4) / 0.6)); return; }
       case 'recoil': recoil(smooth01(phaseT / 0.35)); return;
-      case 'stagger': { this.hurtPose(T, phaseT); return; }
+      case 'stagger': this.staggerPose(T, phaseT); return;
       case 'guard': return;
     }
     // no phases from the world: loop wind-up -> punch -> recoil -> guard on actionT
@@ -594,6 +645,16 @@ export class Character3D {
     if (c < 0.4) windup(smooth01(c / 0.4));
     else if (c < 0.55) punch(smooth01((c - 0.4) / 0.15));
     else if (c < 1.0) recoil(smooth01((c - 0.55) / 0.45));
+  }
+
+  /** Took a blow: arms up shielding the face, torso thrown back, feet stumbling, then settle. */
+  private staggerPose(T: Float32Array, phaseT: number) {
+    const k = smooth01(phaseT / 0.55), r = 1 - k;
+    this.guardPose(T);
+    T[J.spineRZ] = 0.45 * r - 0.1 * k; T[J.headRZ] = 0.4 * r; T[J.hipsX] = -9 * r; T[J.hipsY] = -3 * r - 1.5;
+    T[J.hipsZ] = 2.5 * Math.sin(phaseT * 22) * r; T[J.hipsRX] = 0.12 * Math.sin(phaseT * 22) * r;
+    T[J.uaLZ] = T[J.uaRZ] = 1.5 * r + 0.85 * k; T[J.uaLX] = 0.5 * r + 0.15 * k; T[J.uaRX] = -0.5 * r - 0.15 * k; T[J.faLZ] = T[J.faRZ] = 2.35;
+    T[J.thLZ] = 0.45 * r + 0.3 * k; T[J.thRZ] = -0.6 * r - 0.28 * k; T[J.shLZ] = -0.5 * r - 0.4 * k; T[J.shRZ] = -0.7 * r - 0.4 * k;
   }
 
   private hurtPose(T: Float32Array, actionT: number) {

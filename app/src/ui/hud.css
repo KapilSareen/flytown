@@ -269,6 +269,8 @@
 .body-state .injury { color: var(--fight); }
 .body-state .bond { font-size: 11.5px; font-weight: 600; color: var(--love); margin-top: 6px; }
 .inspector .ifoot { padding: 12px 16px 14px; border-top: var(--line); display: flex; gap: 8px; }
+.inspector .ifoot .btn.is-on { background: var(--accent); color: #2a1a02; box-shadow: 0 6px 16px -6px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.45); }
+.inspector .ifoot .btn.is-on:hover:not(:disabled) { background: #f0a82c; }
 
 /* --- God toolbar ------------------------------------------------------------------ */
 .godwrap { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: calc(100% - 24px); pointer-events: none; }

@@ -10,15 +10,19 @@ export interface SenseContext {
   city: City;
   daylight: number;     // 0..1
   now: number;          // world seconds
+  /** citizens within `objectRange` of (x, y); built once per step by world.ts (falls back to all agents) */
+  near?: (x: number, y: number, r: number) => Agent[];
 }
 
 // Precomputed channel indices (order is fixed by types.ts).
 export const IN = Object.fromEntries(INPUT_CHANNELS.map(c => [c, inputIndex(c)])) as Record<(typeof INPUT_CHANNELS)[number], number>;
 
 export const SENSE = {
-  loomRange: 150,          // px
+  loomRange: 90,           // px: only close threats loom
   loomCone: Math.PI * 0.45, // full-angle cone in front of the agent
-  loomClosing: 75,         // px/s closing speed for full loom
+  loomClosing: 77,         // px/s: 1.6 x normal walking speed (48 px/s); below this nothing looms
+  loomCourse: Math.PI / 7.2, // +-25 degrees: the other must be heading at me
+  loomPersist: 0.3,        // s the threat must persist before it counts
   objectRange: 200,
   foodFalloff: 120,        // odorFood = 1/(1+d/foodFalloff)
   sexFalloff: 150,
@@ -42,13 +46,15 @@ export function foodUnder(city: City, a: Agent) {
   return null;
 }
 
-export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new Float32Array(NI)): Float32Array {
+export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new Float32Array(NI), dt = 1 / 60): Float32Array {
   out.fill(0);
   const hx = Math.cos(a.heading), hy = Math.sin(a.heading);
   const cosCone = Math.cos(SENSE.loomCone / 2);
 
   let loomL = 0, loomR = 0, objL = 0, objR = 0, odorM = 0, odorF = 0;
-  for (const o of ctx.agents) {
+  let loomThreat: Agent | null = null;
+  const others = ctx.near ? ctx.near(a.x, a.y, SENSE.objectRange) : ctx.agents;
+  for (const o of others) {
     if (o === a) continue;
     const dx = o.x - a.x, dy = o.y - a.y;
     const d = Math.hypot(dx, dy) || 1e-3;
@@ -66,16 +72,24 @@ export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new
     const objW = moving * (1 - d / SENSE.objectRange) * (0.4 + 0.6 * Math.max(0, inFront));
     if (side > 0) objR = Math.max(objR, objW); else objL = Math.max(objL, objW);
 
-    // Looming: relative velocity closing on me inside the frontal cone (LC4/LPLC2).
+    // Looming (LC4/LPLC2): a genuine threat only — fast (> 1.6 x walking speed), close, inside my
+    // frontal cone, and on a collision course (their velocity points at me within +-25 degrees).
     if (d < SENSE.loomRange && inFront > cosCone) {
       const rvx = o.vx - a.vx, rvy = o.vy - a.vy;
       const closing = -(rvx * nx + rvy * ny);   // px/s toward me
-      if (closing > 25) {
-        const w = clamp01(closing / SENSE.loomClosing) * (1 - d / SENSE.loomRange);
+      const os = Math.hypot(o.vx, o.vy);
+      const course = os > 1 ? Math.acos(clamp01(-(o.vx * nx + o.vy * ny) / os)) : Math.PI;
+      if (closing > SENSE.loomClosing && course < SENSE.loomCourse) {
+        const w = clamp01((closing - SENSE.loomClosing) / SENSE.loomClosing + 0.6) * (1 - d / SENSE.loomRange);
         if (side > 0) loomR = Math.max(loomR, w); else loomL = Math.max(loomL, w);
+        loomThreat = o;
       }
     }
   }
+  // Persistence: a threat must keep looming for 0.3 s before the channel fires at all.
+  if (loomL > 0 || loomR > 0) a.loomFor += dt; else a.loomFor = 0;
+  if (a.loomFor < SENSE.loomPersist) { loomL = 0; loomR = 0; loomThreat = null; }
+  if (loomThreat) a.threatId = loomThreat.id;
   // An explicit threat (being attacked, a god scare) also looms while fleeing.
   if (a.threat && a.goal?.name === 'flee') {
     const dx = a.threat.x - a.x, dy = a.threat.y - a.y;

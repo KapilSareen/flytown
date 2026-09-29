@@ -118,7 +118,7 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
   const dbg = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
   const gl = renderer.getContext();
   const stats = {
-    fps: 0, bloom: true, calls: 0, chars: 0, frames: 0, dt: 0, renderMs: 0, err: '',
+    fps: 0, bloom: true, calls: 0, chars: 0, frames: 0, dt: 0, renderMs: 0, err: '', tick: (_dt: number) => {},
     gpu: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : 'unknown',
     store: useStore, camera, charMap: chars, scene, renderer, city: world.city,
   };
@@ -130,6 +130,8 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
   let raf = 0;
   const tmp = new THREE.Vector3();
   const lampDist: { d: number; p: THREE.Vector3 }[] = city.lamps.map(p => ({ d: 0, p }));
+  const lampFocus = new THREE.Vector3(1e9, 0, 0);
+  const seen = new Set<number>();
 
   const frame = (now: number) => {
     raf = requestAnimationFrame(frame);
@@ -140,6 +142,7 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
     stats.frames++; stats.dt = dt;
     try { tick(dt); } catch (e) { stats.err = String(e instanceof Error ? e.stack ?? e.message : e); throw e; }
   };
+  stats.tick = (dt: number) => tick(dt);   // debug: step one frame by hand (hidden tabs get no RAF)
   const tick = (dt: number) => {
     const w = getWorld() ?? world;
     const s = useStore.getState();
@@ -183,8 +186,11 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
     city.waterMat.uniforms.uSky.value.copy(at.horizon);
 
     // point-light budget: the lamps nearest the view centre
-    for (const l of lampDist) l.d = l.p.distanceToSquared(f);
-    lampDist.sort((a, b) => a.d - b.d);
+    if (lampFocus.distanceToSquared(f) > 30 * 30) {          // re-rank the lamps only when the view centre moves
+      lampFocus.copy(f);
+      for (const l of lampDist) l.d = l.p.distanceToSquared(f);
+      lampDist.sort((a, b) => a.d - b.d);
+    }
     for (let i = 0; i < POINT_LIGHTS; i++) {
       const p = points[i], l = lampDist[i];
       if (!l) { p.intensity = 0; continue; }
@@ -193,7 +199,7 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
     }
 
     // ---- characters --------------------------------------------------------------------
-    const seen = new Set<number>();
+    seen.clear();
     hitObjects.length = 0;
     let dancers = 0;
     const followedAgent = s.cameraMode === 'follow' ? w.agents.find(x => x.id === s.followId) : undefined;
@@ -204,10 +210,15 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
       hitObjects.push(ch.hit);
       const selected = s.selectedId === a.id, followed = s.followId === a.id && s.cameraMode === 'follow';
       const camDist = tmp.set(a.x, 20, a.y).distanceTo(camera.pos);
+      // labels only for heads that project inside the viewport, in front of the camera and not right under it
+      tmp.set(a.x, 58, a.y).project(camera.cam);
+      const labelOk = tmp.z < 1 && Math.abs(tmp.x) < 1.02 && Math.abs(tmp.y) < 1.02 && camDist > 60;
       let seat: SeatKind = 'none';
       const seatDef = typeof a.seat === 'number' ? w.city.seats?.[a.seat] : undefined;
       if (seatDef && (a.actionPhase === 'sit' || a.action === 'eat')) seat = seatDef.standing ? 'stand' : 'chair';
-      ch.update(a, w.time, dt, animDt, groundHeight(w.city, a.x, a.y), selected, followed, camDist, seat, camera.hoverId === a.id);
+      // per-frame budget: far, unselected citizens animate at half rate (their pose is sub-pixel anyway)
+      const far = camDist > 900 && !selected && !followed;
+      if (!far || (stats.frames + a.id) % 2 === 0) ch.update(a, w.time, far ? dt * 2 : dt, far ? animDt * 2 : animDt, groundHeight(w.city, a.x, a.y), selected, followed, camDist, seat, camera.hoverId === a.id, labelOk);
       if (followed) {
         spot.visible = true;
         spot.position.set(a.x + 20, 150, a.y - 30); spot.target.position.set(a.x, 10, a.y);
@@ -287,7 +298,7 @@ export async function startRenderer3D(host: HTMLElement, world: WorldState): Pro
     emitAcc.set(a.id, 0);
     switch (a.action) {
       case 'sleep': particles.zzz(a.x + 6, a.y, 22); break;
-      case 'sing': rings.emit(a.x, a.y, 8, 46, 1.1, 0xff8fb5, 0.55); particles.glow(a.x + Math.cos(a.heading) * 5, a.y + Math.sin(a.heading) * 5, 36, 0xffb3d1, 2); break;
+      case 'sing': if (a.actionPhase !== 'talk') { rings.emit(a.x, a.y, 8, 46, 1.1, 0xff8fb5, 0.55); particles.glow(a.x + Math.cos(a.facing ?? a.heading) * 5, a.y + Math.sin(a.facing ?? a.heading) * 5, 36, 0xffb3d1, 2); } break;
       case 'groom': particles.puff(a.x, a.y, 30, 3, 0xe8dcc8); break;
       case 'eat': {
         const sd = typeof a.seat === 'number' ? w.city.seats?.[a.seat] : undefined;

@@ -37,7 +37,7 @@ export function updateDrives(a: Agent, hour: number, daylight: number, dt: numbe
   const loom = Math.max(i[IN.visionLoomL], i[IN.visionLoomR]);
   // Provocation: two males lingering close (strong cVA / odorMale) builds up over ~3 s and decays.
   const crowded = a.sex === 'male' && i[IN.odorMale] > 0.5;
-  a.provoked = c01(a.provoked + (crowded ? 0.18 : -0.08) * dt);
+  a.provoked = c01(a.provoked + (crowded ? 0.25 : -0.04) * dt);
 
   // Female receptivity: the courtship readout, or (when that readout is male-only and hence
   // silent in female bodies) a documented proxy: she is not fleeing / backing away.
@@ -51,7 +51,7 @@ export function updateDrives(a: Agent, hour: number, daylight: number, dt: numbe
     romance: a.sex === 'male'
       ? c01(o[OUT.courtship] * g.courtship + i[IN.odorFemale] * 0.25 + a.mood * 0.15 + (a.godReceptive > 0 ? 0.5 : 0))
       : c01(receptivity + (a.godReceptive > 0 ? 0.6 : 0)),
-    hostility: c01(o[OUT.aggression] * g.aggression + i[IN.odorMale] * 0.15 * (a.sex === 'male' ? 1 : 0.3) + a.provoked * 0.35 + b.injury * 0.15 + (a.mood - 0.5) * 0.25 + (a.riotUntil > 0 ? 0.6 : 0)),
+    hostility: c01(o[OUT.aggression] * g.aggression + i[IN.odorMale] * 0.15 * (a.sex === 'male' ? 1 : 0.3) + a.provoked * 0.5 + b.injury * 0.15 + (a.mood - 0.5) * 0.25 + (a.riotUntil > 0 ? 0.6 : 0)),
     fear: c01(o[OUT.escape] * g.escape + loom * 0.35),
     fatigue: c01(o[OUT.sleep] * g.sleep + (late ? 0.45 : 0) + (1 - b.energy) * 0.6),
     social: c01(0.4 + (evening ? 0.3 : 0) + (a.mood - 0.5) * 0.3 + (o[OUT.sing] + o[OUT.courtship]) * 0.15 - b.hunger * 0.2),

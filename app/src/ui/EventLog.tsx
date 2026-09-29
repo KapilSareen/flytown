@@ -1,6 +1,7 @@
-import { useMemo, type CSSProperties, type ReactNode } from 'react';
+import { memo, useMemo, type CSSProperties, type ReactNode } from 'react';
 import { useStore, type EventKind, type GameEvent } from '../store';
 import { eventTone } from './labels';
+import { useNameSig } from './selectors';
 import { IconBolt, IconDust, IconFeed, IconFight, IconInfo, IconLove, IconScare, IconSleep } from './icons';
 
 const SHOW = 6;
@@ -19,8 +20,10 @@ function KindIcon({ k }: { k: EventKind }) {
   }
 }
 
+const pick = (id: number) => useStore.getState().worldApi?.select(id);
+
 /** Split the event text on actor names so each name becomes a clickable span. */
-function Line({ e, names, onPick }: { e: GameEvent; names: Map<number, string>; onPick: (id: number) => void }) {
+const Line = memo(function Line({ e, names }: { e: GameEvent; names: Map<number, string> }) {
   const parts = useMemo(() => {
     const actors = e.actors
       .map((id) => ({ id, name: names.get(id) ?? '' }))
@@ -32,22 +35,24 @@ function Line({ e, names, onPick }: { e: GameEvent; names: Map<number, string>; 
     e.text.split(re).forEach((seg, i) => {
       const a = actors.find((x) => x.name === seg);
       out.push(a
-        ? <span key={i} className="actor" role="button" tabIndex={0} onClick={() => onPick(a.id)}
-            onKeyDown={(ev) => { if (ev.key === 'Enter') onPick(a.id); }}>{seg}</span>
+        ? <span key={i} className="actor" role="button" tabIndex={0} onClick={() => pick(a.id)}
+            onKeyDown={(ev) => { if (ev.key === 'Enter') pick(a.id); }}>{seg}</span>
         : seg);
     });
     return out;
-  }, [e, names, onPick]);
+  }, [e, names]);
   return <>{parts}</>;
-}
+});
 
-export function EventLog() {
+export const EventLog = memo(function EventLog() {
   const events = useStore((s) => s.events);
-  const citizens = useStore((s) => s.citizens);
-  const api = useStore((s) => s.worldApi);
-  const names = useMemo(() => new Map(citizens.map((c) => [c.id, c.name])), [citizens]);
+  const nameSig = useNameSig();
+  const names = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const line of nameSig.split('\n')) { if (!line) continue; const i = line.indexOf(':'); m.set(Number(line.slice(0, i)), line.slice(i + 1)); }
+    return m;
+  }, [nameSig]);
   const recent = events.slice(-SHOW);
-  const pick = (id: number) => api?.select(id);
 
   return (
     <div className="events" aria-live="polite" aria-label="Recent events">
@@ -57,10 +62,10 @@ export function EventLog() {
         return (
           <div key={e.id} className={`ev ${eventTone(e.kind)}`} style={{ '--o': o } as CSSProperties}>
             <span className="k"><KindIcon k={e.kind} /></span>
-            <span className="txt"><Line e={e} names={names} onPick={pick} /></span>
+            <span className="txt"><Line e={e} names={names} /></span>
           </div>
         );
       })}
     </div>
   );
-}
+});

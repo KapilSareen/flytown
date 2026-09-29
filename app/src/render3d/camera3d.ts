@@ -13,7 +13,7 @@ import type { Agent } from '../world/agent';
 export const CAM = {
   pitch: 55 * Math.PI / 180,
   minDist: 180, maxDist: 1900, startDist: 900,
-  followMin: 70, followMax: 340, followDist: 140, followElev: 0.58, lookAhead: 34, lookUp: 16,
+  followMin: 90, followMax: 420, followDist: 185, followElev: 32 * Math.PI / 180, lookAhead: 58, lookUp: 36,
   godRate: 26, followRate: 4.2, switchRate: 3.2,
   dblClickMs: 350, dragThreshold: 5,
 };
@@ -52,6 +52,8 @@ export class Camera3D {
   private switchBlend = 1;              // 0 right after a mode switch -> 1 settled
   private shakeAmp = 0;
   private hoverX = -1; private hoverY = -1;
+  private hoverTick = 0;
+  private scratch = { dPos: new THREE.Vector3(), dLook: new THREE.Vector3(), f: new THREE.Vector3(), p: new THREE.Vector3() };
   /** Citizen under the pointer (god or follow view), for the cursor and a faint ring. */
   hoverId: number | null = null;
   private off: (() => void)[] = [];
@@ -103,9 +105,9 @@ export class Camera3D {
       const s = useStore.getState();
       if (s.cameraMode === 'follow') this.leaveFollow();
       if (this.dragging === 2) { this.yaw = wrap(this.yaw - dx * 0.005); return; }
-      const p = new THREE.Vector3();
+      const p = this.scratch.p;
       if (this.groundAt(e.clientX, e.clientY, p)) {
-        this.target.add(this.anchor.clone().sub(p));
+        this.target.add(p.subVectors(this.anchor, p));
         this.clampTarget();
         // snap so the grab stays exact under the cursor
         this.desiredGod(this.pos, this.look); this.cam.position.copy(this.pos); this.cam.lookAt(this.look);
@@ -198,10 +200,10 @@ export class Camera3D {
     this.yawVel += (want * 1.4 - this.yawVel) * (1 - Math.exp(-8 * dt));
     if (Math.abs(this.yawVel) > 1e-3) this.yaw = wrap(this.yaw + this.yawVel * dt);
 
-    const dPos = new THREE.Vector3(), dLook = new THREE.Vector3();
+    const { dPos, dLook } = this.scratch;
     let rate: number;
     if (followed) {
-      const f = new THREE.Vector3(Math.cos(followed.heading), 0, Math.sin(followed.heading));
+      const f = this.scratch.f.set(Math.cos(followed.heading), 0, Math.sin(followed.heading));
       this.fwd.lerp(f, 1 - Math.exp(-3 * dt)).normalize();
       const d = this.followDist, elev = CAM.followElev;
       dPos.set(followed.x - this.fwd.x * d * Math.cos(elev), d * Math.sin(elev) + 8, followed.y - this.fwd.z * d * Math.cos(elev));
@@ -217,12 +219,14 @@ export class Camera3D {
     this.pos.lerp(dPos, k); this.look.lerp(dLook, k);
     this.cam.position.copy(this.pos);
     if (this.shakeAmp > 0.01) {
-      if (followed) this.cam.position.add(new THREE.Vector3((Math.random() - 0.5) * 3.2, (Math.random() - 0.5) * 2.2, (Math.random() - 0.5) * 3.2).multiplyScalar(this.shakeAmp));
+      if (followed) this.cam.position.add(this.scratch.p.set((Math.random() - 0.5) * 3.2, (Math.random() - 0.5) * 2.2, (Math.random() - 0.5) * 3.2).multiplyScalar(this.shakeAmp));
       this.shakeAmp *= Math.exp(-11 * dt);
     }
     this.cam.lookAt(this.look);
     this.groundAt(this.canvas.clientWidth / 2, this.canvas.clientHeight / 2, this.focus) ?? this.focus.copy(this.look);
-    this.hoverId = this.hoverX >= 0 && !this.dragging ? this.pick(this.hoverX, this.hoverY) : null;
+    // hover raycast every 4th frame (it allocates intersection records)
+    if (this.hoverX < 0 || this.dragging) this.hoverId = null;
+    else if ((this.hoverTick = (this.hoverTick + 1) & 3) === 0) this.hoverId = this.pick(this.hoverX, this.hoverY);
   }
 
   destroy() { for (const f of this.off) f(); }

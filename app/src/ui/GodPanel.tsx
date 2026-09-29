@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { INPUT_CHANNELS, OUTPUT_CHANNELS, type InjectTarget, type InputChannel, type OutputChannel } from '../brain/types';
 import { useStore, type CitizenView } from '../store';
+import { useSlotCitizen } from './selectors';
 import { useUi } from './uiStore';
 import { INPUT_LABELS, outputLabel } from './labels';
 import { TOWN_POWERS, castTownPower, type TownPower } from './townPowers';
@@ -69,21 +70,29 @@ function Tb({ id, label, icon, tone = 'ink', hotkey, disabled, title, pulse, onC
 
 interface ActionDef { key: string; label: string; icon: ReactNode; tone?: string; needs: 1 | 2; hint: string; run: (a: number, b: number) => void }
 
-export function GodPanel() {
+/** Cell-type datalist: ~2000 options, built once per manifest and only while the drawer is open. */
+const TypeList = memo(function TypeList() {
+  const types = useStore((s) => s.manifest?.types);
+  const opts = useMemo(() => (types ?? []).map((t) => <option key={t} value={t} />), [types]);
+  return <datalist id="god-types">{opts}</datalist>;
+});
+
+export const GodPanel = memo(function GodPanel() {
   const api = useStore((s) => s.worldApi);
-  const citizens = useStore((s) => s.citizens);
-  const manifest = useStore((s) => s.manifest);
   const selectedId = useStore((s) => s.selectedId);
-  const { slotA, slotB, setSlotA, setSlotB, offerSelection, advancedOpen, setAdvancedOpen } = useUi();
+  const slotA = useUi((s) => s.slotA);
+  const slotB = useUi((s) => s.slotB);
+  const advancedOpen = useUi((s) => s.advancedOpen);
+  const { setSlotA, setSlotB, offerSelection, setAdvancedOpen } = useUi.getState();
+  const A = useSlotCitizen(slotA);
+  const B = useSlotCitizen(slotB);
 
   useEffect(() => { if (selectedId !== null) offerSelection(selectedId); }, [selectedId, offerSelection]);
+  // drop slots whose citizen left town
   useEffect(() => {
-    if (slotA !== null && !citizens.some((c) => c.id === slotA)) setSlotA(null);
-    if (slotB !== null && !citizens.some((c) => c.id === slotB)) setSlotB(null);
-  }, [citizens, slotA, slotB, setSlotA, setSlotB]);
-
-  const A = citizens.find((c) => c.id === slotA);
-  const B = citizens.find((c) => c.id === slotB);
+    if (slotA !== null && A === undefined) setSlotA(null);
+    if (slotB !== null && B === undefined) setSlotB(null);
+  }, [A, B, slotA, slotB, setSlotA, setSlotB]);
 
   const [pulse, setPulse] = useState<string | null>(null);
   useEffect(() => {
@@ -161,7 +170,7 @@ export function GodPanel() {
   const [ms, setMs] = useState(500);
   const [modChannel, setModChannel] = useState<InputChannel>('odorFood');
   const [modGain, setModGain] = useState(1);
-  const typeId = useMemo(() => (manifest ? manifest.types.indexOf(typeName) : -1), [manifest, typeName]);
+  const typeId = useMemo(() => (typeName ? (useStore.getState().manifest?.types.indexOf(typeName) ?? -1) : -1), [typeName]);
   const target: InjectTarget | null = targetKind === 'channel'
     ? { channel: channel as InputChannel | OutputChannel }
     : typeId >= 0 ? { typeId } : null;
@@ -204,9 +213,7 @@ export function GodPanel() {
               <>
                 <input type="text" list="god-types" placeholder="Type name, e.g. DNp09" value={typeName}
                   onChange={(e) => setTypeName(e.target.value)} aria-label="Cell type" spellCheck={false} />
-                <datalist id="god-types">
-                  {manifest?.types.map((t) => <option key={t} value={t} />)}
-                </datalist>
+                <TypeList />
                 {typeName && typeId < 0 && <span className="muted" style={{ fontSize: 11 }}>not in manifest</span>}
               </>
             )}
@@ -279,4 +286,4 @@ export function GodPanel() {
       </div>
     </div>
   );
-}
+});

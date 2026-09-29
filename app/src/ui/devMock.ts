@@ -188,6 +188,43 @@ export function installDevMock() {
   };
   setTimeout(tick, 200);
 
+  // window.__hudBench(): forced publishes, React commit ms per publish (needs the dev build's Profiler).
+  (window as unknown as { __hudBench: () => Promise<unknown> }).__hudBench = async () => {
+    const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+    const w = window as unknown as { __hudCommits?: number[] };
+    const live = store.getState().worldApi ?? api;
+    live.setPaused(true);
+    live.setPopulation(30, 0.5);
+    for (let i = 0; i < 40 && store.getState().citizens.length < 30; i++) await new Promise((r) => setTimeout(r, 100));
+    const run = async (label: string, mut: () => void) => {
+      const commits: number[] = (w.__hudCommits = []);
+      const t0 = performance.now();
+      for (let i = 0; i < 20; i++) { mut(); await tick(); }
+      const wall = (performance.now() - t0) / 20;
+      const total = commits.reduce((a, b) => a + b, 0);
+      return { label, renderMs: +(total / 20).toFixed(2), perCommitMs: +(total / Math.max(1, commits.length)).toFixed(2), wallMs: +wall.toFixed(2), commits: commits.length, citizens: store.getState().citizens.length };
+    };
+    const citPub = () => {
+      const st = store.getState();
+      store.setState({ citizens: st.citizens.map((c) => ({ ...c,
+        inputs: c.inputs.map((v) => Math.min(1, v + 0.01)), outputs: c.outputs.map((v) => v * 0.99),
+        hunger: Math.min(1, c.hunger + 0.0005) })) });
+    };
+    const fpsPub = () => store.setState({ fps: 55 + Math.random() * 5, perf: { msPerSimMs: Math.random(), activeNeurons: 1700 + Math.floor(Math.random() * 100), agents: 30 } });
+    const timePub = () => store.setState({ timeOfDay: store.getState().timeOfDay + 0.0003 });
+    const focusPub = () => {
+      const st = store.getState(); const m = st.manifest!; const id = st.selectedId ?? -1;
+      store.setState({ focus: { agentId: id, spikes: Uint32Array.from({ length: 100 }, () => Math.floor(Math.random() * m.neurons)),
+        regionRates: Float32Array.from(Object.keys(m.regions), () => Math.random() * 40), topTypes: Array.from({ length: 8 }, (_, i) => ({ typeId: i + 1, hz: 40 - i })) } });
+    };
+    live.select(null); await tick();
+    const closed = [await run('citizens (inspector closed)', citPub), await run('fps+perf', fpsPub), await run('timeOfDay', timePub)];
+    live.select(store.getState().citizens[0].id); await tick();
+    const open = [await run('citizens (inspector open)', citPub), await run('focus (inspector open)', focusPub)];
+    live.select(null);
+    return [...closed, ...open];
+  };
+
   const start = () => {
     const m = store.getState().manifest!;
     const regionNames = Object.keys(m.regions);

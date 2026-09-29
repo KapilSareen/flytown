@@ -65,6 +65,7 @@ export interface City {
   food: Poi[];          // cafés + market (odorFood emitters, sugar taste on tile)
   seats: Seat[];        // terrace chairs / stall slots, grouped by venue (index into food)
   obstacles: Obstacle[]; // everything a citizen cannot walk through (see docs/RENDER_API.md)
+  obstacleBuckets: Obstacle[][];   // obstacles by HASH_CELL bucket (see bucketIndex), for O(1) clamps
   garbage: Poi[];
   benches: Poi[];
   lamps: Poi[];
@@ -325,28 +326,49 @@ export function buildCity(seed = 7): City {
       grid[gy * GRID_W + gx] = v;
     }
   }
-  // Block every cell whose centre lies inside an obstacle (buildings with a small clearance).
-  // Small props only block a cell when they sit near its centre, so paths stay natural; the
-  // continuous clamp in world.ts handles the rest.
+  // Block every cell an obstacle overlaps (buildings with a small clearance), so A* and the
+  // line-of-sight smoothing never route through a prop that the continuous clamp would stop.
   for (let gy = 0; gy < GRID_H; gy++) {
     for (let gx = 0; gx < GRID_W; gx++) {
-      const x = gx * CELL + CELL / 2, y = gy * CELL + CELL / 2;
+      const cell: Rect = { x: gx * CELL, y: gy * CELL, w: CELL, h: CELL };
+      const cx = cell.x + CELL / 2, cy = cell.y + CELL / 2;
       for (const o of obstacles) {
         if (o.tag === 'table') continue;                       // chairs sit around tables
         const hit = o.kind === 'rect'
-          ? inRect(x, y, grow(o, o.tag === 'building' ? 4 : 0))
-          : Math.hypot(o.x - x, o.y - y) < o.r + (o.tag === 'fountain' || o.tag === 'pond' ? 4 : 0);
+          ? intersects(cell, grow(o, o.tag === 'building' ? 4 : 2))
+          : Math.hypot(o.x - cx, o.y - cy) < o.r + CELL * 0.5 + (o.tag === 'fountain' || o.tag === 'pond' ? 4 : 0);
         if (hit) { grid[gy * GRID_W + gx] = 0; break; }
       }
     }
   }
 
+  // Bucket obstacles: each obstacle goes into every bucket its bounds (grown by a body radius) touch.
+  const obstacleBuckets: Obstacle[][] = Array.from({ length: HASH_W * HASH_H }, () => []);
+  for (const o of obstacles) {
+    const pad = 12;
+    const bx0 = o.kind === 'rect' ? o.x - pad : o.x - o.r - pad, by0 = o.kind === 'rect' ? o.y - pad : o.y - o.r - pad;
+    const bx1 = o.kind === 'rect' ? o.x + o.w + pad : o.x + o.r + pad, by1 = o.kind === 'rect' ? o.y + o.h + pad : o.y + o.r + pad;
+    for (let by = Math.max(0, Math.floor(by0 / HASH_CELL)); by <= Math.min(HASH_H - 1, Math.floor(by1 / HASH_CELL)); by++)
+      for (let bx = Math.max(0, Math.floor(bx0 / HASH_CELL)); bx <= Math.min(HASH_W - 1, Math.floor(bx1 / HASH_CELL)); bx++)
+        obstacleBuckets[by * HASH_W + bx].push(o);
+  }
+
   return {
     w: WORLD_W, h: WORLD_H, margin, roadW, sidewalkW,
-    blocks, roadsH, roadsV, buildings, pois, food, seats, obstacles, garbage, benches, lamps, trees, bar, fountain, pond, planters, bikeracks,
+    blocks, roadsH, roadsV, buildings, pois, food, seats, obstacles, obstacleBuckets, garbage, benches, lamps, trees, bar, fountain, pond, planters, bikeracks,
     plazaCenter, parkCenter, grid,
   };
 }
+
+// ---- spatial hash (shared by obstacles and, per step, by citizens) --------------------
+export const HASH_CELL = 120;
+export const HASH_W = Math.ceil(WORLD_W / HASH_CELL);   // 20
+export const HASH_H = Math.ceil(WORLD_H / HASH_CELL);   // 14
+export const bucketIndex = (x: number, y: number) => {
+  const bx = Math.max(0, Math.min(HASH_W - 1, Math.floor(x / HASH_CELL)));
+  const by = Math.max(0, Math.min(HASH_H - 1, Math.floor(y / HASH_CELL)));
+  return by * HASH_W + bx;
+};
 
 export const inRect = (x: number, y: number, r: Rect) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 export const intersects = (a: Rect, b: Rect) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
