@@ -66,8 +66,8 @@ export const eventTone = (k: EventKind): Tone => {
 
 /** Muted-but-distinct hues for brain regions, in manifest.regions order. */
 export const REGION_COLORS = [
-  '#f5b544', '#7fb2ff', '#7ee0c2', '#e58cff', '#ff9a7a', '#a9d86e',
-  '#6fd4f2', '#f2a9c8', '#c9b8ff', '#ffd27a', '#8ed1a4', '#f0f0f0',
+  '#e69b1f', '#2f6fdf', '#159a7a', '#8b4bd6', '#e0523f', '#5e8f1a',
+  '#0f8fb0', '#d6408a', '#6157d6', '#b8770a', '#2b8a5a', '#6b645c',
 ];
 export const regionColor = (i: number) => REGION_COLORS[i % REGION_COLORS.length];
 

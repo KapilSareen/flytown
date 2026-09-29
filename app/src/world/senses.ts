@@ -17,7 +17,7 @@ export const IN = Object.fromEntries(INPUT_CHANNELS.map(c => [c, inputIndex(c)])
 
 export const SENSE = {
   loomRange: 150,          // px
-  loomCone: Math.PI * 0.6, // full-angle cone in front of the agent
+  loomCone: Math.PI * 0.45, // full-angle cone in front of the agent
   loomClosing: 75,         // px/s closing speed for full loom
   objectRange: 200,
   foodFalloff: 120,        // odorFood = 1/(1+d/foodFalloff)
@@ -27,14 +27,11 @@ export const SENSE = {
 };
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+export const smoothstep = (e0: number, e1: number, v: number) => { const t = clamp01((v - e0) / (e1 - e0)); return t * t * (3 - 2 * t); };
 
 /** Daylight 0..1 as a function of hour (0..24): sunrise 5.5-7.5, sunset 18-20. */
 export function daylightAt(hour: number): number {
-  const smooth = (e0: number, e1: number, v: number) => {
-    const t = clamp01((v - e0) / (e1 - e0));
-    return t * t * (3 - 2 * t);
-  };
-  return smooth(5.5, 7.5, hour) * (1 - smooth(18, 20, hour));
+  return smoothstep(5.5, 7.5, hour) * (1 - smoothstep(18, 20, hour));
 }
 
 /** Is the agent standing on a food source? Returns the POI or null. */
@@ -73,15 +70,15 @@ export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new
     if (d < SENSE.loomRange && inFront > cosCone) {
       const rvx = o.vx - a.vx, rvy = o.vy - a.vy;
       const closing = -(rvx * nx + rvy * ny);   // px/s toward me
-      if (closing > 18) {
+      if (closing > 25) {
         const w = clamp01(closing / SENSE.loomClosing) * (1 - d / SENSE.loomRange);
         if (side > 0) loomR = Math.max(loomR, w); else loomL = Math.max(loomL, w);
       }
     }
   }
-  // A god "scare" or an explicit threat point also looms.
-  if (a.escapeFrom && ctx.now < a.escapeUntil) {
-    const dx = a.escapeFrom.x - a.x, dy = a.escapeFrom.y - a.y;
+  // An explicit threat (being attacked, a god scare) also looms while fleeing.
+  if (a.threat && a.goal?.name === 'flee') {
+    const dx = a.threat.x - a.x, dy = a.threat.y - a.y;
     const side = hx * dy - hy * dx;
     if (side > 0) loomR = Math.max(loomR, 0.8); else loomL = Math.max(loomL, 0.8);
   }
@@ -111,7 +108,8 @@ export function senseInputs(ctx: SenseContext, a: Agent, out: Float32Array = new
   out[IN.odorFemale] = clamp01(odorF);
   out[IN.tasteSugar] = onFood && b.hunger > 0.2 ? clamp01(0.5 + b.hunger) : 0;
   out[IN.tasteBitter] = clamp01(bitter);
-  out[IN.touchAntenna] = clamp01(b.dust);
+  // Antennal touch only drives grooming when quite dusty (smoothstep 0.45..1).
+  out[IN.touchAntenna] = smoothstep(0.45, 1.0, b.dust);
   out[IN.soundSong] = sung;
   // Low energy dims the light channel: a tired citizen's clock leans to sleep.
   out[IN.light] = clamp01(ctx.daylight * (0.45 + 0.55 * b.energy));

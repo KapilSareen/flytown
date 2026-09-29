@@ -42,14 +42,14 @@ export function NeuronField({ count = 200, className }: { count?: number; classN
         const dx = px[i] - px[j], dy = py[i] - py[j];
         const d2 = dx * dx + dy * dy;
         if (d2 > link * link) continue;
-        const a = (1 - Math.sqrt(d2) / link) * 0.16;
-        ctx.strokeStyle = `rgba(245,181,68,${a.toFixed(3)})`;
+        const a = (1 - Math.sqrt(d2) / link) * 0.22;
+        ctx.strokeStyle = `rgba(214,130,20,${a.toFixed(3)})`;
         ctx.beginPath(); ctx.moveTo(px[i], py[i]); ctx.lineTo(px[j], py[j]); ctx.stroke();
       }
       const t = now / 1000;
       for (let i = 0; i < count; i++) {
         const b = still ? 0.6 : 0.45 + 0.4 * Math.sin(t * 1.3 + ph[i]);
-        ctx.fillStyle = `rgba(245,181,68,${b.toFixed(3)})`;
+        ctx.fillStyle = `rgba(214,130,20,${b.toFixed(3)})`;
         ctx.beginPath(); ctx.arc(px[i], py[i], 1.4, 0, Math.PI * 2); ctx.fill();
       }
       if (!still) raf = requestAnimationFrame(draw);

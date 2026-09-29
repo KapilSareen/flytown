@@ -8,7 +8,7 @@ export function LoadingScreen() {
     <div className="loading" role="status" aria-live="polite">
       <NeuronField className="field" />
       <div className="field-mask" />
-      <div className="word">FLYTOWN</div>
+      <div className="word">Flytown</div>
       <div className="tag">a town of people with fly brains</div>
       <div className="phase">{loading.phase}</div>
       <div className="track"><i style={{ width: `${p * 100}%` }} /></div>

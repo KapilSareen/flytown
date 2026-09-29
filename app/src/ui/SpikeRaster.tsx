@@ -27,12 +27,12 @@ function buildLayout(m: BrainManifest): Layout {
   for (let ri = 0; ri < regionNames.length; ri++) for (let i = 0; i < n; i++) if (regionOf[i] === ri) order[k++] = i;
   for (let i = 0; i < n; i++) if (regionOf[i] === 255) order[k++] = i;
   const rowOf = new Uint8Array(n);
-  const rowColor = new Array<string>(ROWS).fill('rgba(236,238,242,.6)');
+  const rowColor = new Array<string>(ROWS).fill('#6b645c');
   for (let r = 0; r < n; r++) {
     const row = Math.min(ROWS - 1, Math.floor((r * ROWS) / n));
     rowOf[order[r]] = row;
     const reg = regionOf[order[r]];
-    if (rowColor[row] === 'rgba(236,238,242,.6)' && reg !== 255) rowColor[row] = regionColor(reg);
+    if (rowColor[row] === '#6b645c' && reg !== 255) rowColor[row] = regionColor(reg);
   }
   return { rowOf, rowColor, regionNames };
 }
@@ -79,7 +79,7 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
       for (let row = 0; row < ROWS; row++) {
         const c = cnt[row];
         if (!c) continue;
-        ctx.globalAlpha = Math.min(1, 0.6 + c * 0.2);
+        ctx.globalAlpha = Math.min(1, 0.7 + c * 0.15);
         ctx.fillStyle = layout.rowColor[row];
         ctx.fillRect(r.cursor, row, 1, 1);
       }
@@ -122,8 +122,8 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
       const fresh = 5;
       const fx = x0 + (COLS - fresh) * colW;
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.7;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = 0.5;
       ctx.filter = `blur(${2 * dpr}px)`;
       if (r.cursor >= fresh) ctx.drawImage(r.canvas, r.cursor - fresh, 0, fresh, ROWS, fx, 0, fresh * colW, h);
       else {
@@ -135,10 +135,10 @@ export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; fo
       // write head: a thin amber scanline with a faint halo
       const hx = Math.round(w - shift);
       const halo = ctx.createLinearGradient(hx - 10 * dpr, 0, hx, 0);
-      halo.addColorStop(0, 'rgba(245,181,68,0)'); halo.addColorStop(1, 'rgba(245,181,68,.14)');
+      halo.addColorStop(0, 'rgba(230,155,31,0)'); halo.addColorStop(1, 'rgba(230,155,31,.18)');
       ctx.fillStyle = halo; ctx.fillRect(hx - 10 * dpr, 0, 10 * dpr, h);
       const line = ctx.createLinearGradient(0, 0, 0, h);
-      line.addColorStop(0, 'rgba(245,181,68,0)'); line.addColorStop(0.5, 'rgba(245,181,68,.75)'); line.addColorStop(1, 'rgba(245,181,68,0)');
+      line.addColorStop(0, 'rgba(230,155,31,0)'); line.addColorStop(0.5, 'rgba(230,155,31,.9)'); line.addColorStop(1, 'rgba(230,155,31,0)');
       ctx.fillStyle = line; ctx.fillRect(hx - dpr, 0, dpr, h);
     };
     raf = requestAnimationFrame(draw);

@@ -47,7 +47,7 @@ function BrainGlyph({ rates, max, names }: { rates: Float32Array | null; max: nu
 }
 
 const DRIVE_TONE: Partial<Record<(typeof OUTPUT_CHANNELS)[number], Tone>> = { aggression: 'fight', courtship: 'love', sing: 'love', sleep: 'sleep' };
-const GLOW: Record<Tone, string> = { neutral: 'transparent', accent: 'transparent', fight: 'rgba(224,96,76,.35)', love: 'rgba(245,181,68,.32)', sleep: 'rgba(124,152,230,.35)' };
+const GLOW: Record<Tone, string> = { neutral: 'transparent', accent: 'transparent', fight: 'rgba(217,67,47,.4)', love: 'rgba(230,155,31,.42)', sleep: 'rgba(63,111,216,.38)' };
 
 export function Inspector() {
   const selectedId = useStore((s) => s.selectedId);

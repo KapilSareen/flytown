@@ -2,14 +2,18 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useStore } from '../store';
 import { useUi } from './uiStore';
 import { fmtClock, fmtInt } from './labels';
-import { FlipNum } from './motion';
+import { useEased } from './useEased';
+import { useThrottled } from './useThrottled';
 import { IconEye, IconFollow, IconInfo, IconPause, IconPlay } from './icons';
 
 const SPEEDS = [0.5, 1, 2, 4];
 const BRAIN_SPEEDS = [0.1, 0.25, 0.5, 1];
 
 /** Sun / moon on a shallow arc: 6h rises left, 18h sets right, night goes below. */
-function DayArc({ hour }: { hour: number }) {
+function DayArc({ hour: target }: { hour: number }) {
+  // ease between publishes so the sun glides; snap across the midnight wrap
+  const eased = useEased(target, 3);
+  const hour = Math.abs(eased - target) > 6 ? target : eased;
   const day = hour >= 6 && hour < 18;
   const t = day ? (hour - 6) / 12 : ((hour + 6) % 24) / 12;
   const a = Math.PI * (1 - t);
@@ -17,11 +21,11 @@ function DayArc({ hour }: { hour: number }) {
   const cy = 22 - 16 * Math.sin(a);
   return (
     <svg className="arc" width="64" height="26" viewBox="0 0 64 26" aria-hidden>
-      <path d="M6 22a26 16 0 0 1 52 0" fill="none" stroke="rgba(255,255,255,.12)" strokeWidth="1" />
-      <line x1="2" y1="22" x2="62" y2="22" stroke="rgba(255,255,255,.14)" strokeWidth="1" />
+      <path d="M6 22a26 16 0 0 1 52 0" fill="none" stroke="rgba(30,25,20,.14)" strokeWidth="1" />
+      <line x1="2" y1="22" x2="62" y2="22" stroke="rgba(30,25,20,.18)" strokeWidth="1" />
       {day
-        ? <><circle cx={cx} cy={cy} r="5" fill="rgba(245,181,68,.25)" /><circle cx={cx} cy={cy} r="3" fill="#f5b544" /></>
-        : <circle cx={cx} cy={cy} r="2.6" fill="none" stroke="rgba(236,238,242,.7)" strokeWidth="1.2" />}
+        ? <><circle cx={cx} cy={cy} r="5" fill="rgba(230,155,31,.3)" /><circle cx={cx} cy={cy} r="3" fill="#e69b1f" /></>
+        : <circle cx={cx} cy={cy} r="2.6" fill="none" stroke="rgba(30,25,20,.55)" strokeWidth="1.2" />}
     </svg>
   );
 }
@@ -59,9 +63,9 @@ function PopulationControl({ males, females }: { males: number; females: number 
   return (
     <div className="popwrap hide-md" ref={wrap}>
       <button className={`chip pop${open ? ' is-on' : ''}`} onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="dialog" title="Population: click to resize the town" disabled={!api}>
-        <span className="sex">♂</span><FlipNum value={males} />
+        <span className="sex">♂</span><span className="num cnt">{males}</span>
         <span className="sep" />
-        <span className="sex">♀</span><FlipNum value={females} />
+        <span className="sex">♀</span><span className="num cnt">{females}</span>
       </button>
       {open && (
         <div className="glass popover" role="dialog" aria-label="Population">
@@ -102,7 +106,7 @@ function Brand({ live }: { live: number }) {
     <div className="brand" style={{ '--live': live } as CSSProperties}>
       <FlyMark />
       <div className="wordwrap">
-        <span className="word">FLYTOWN</span>
+        <span className="word">Flytown</span>
         <span className="rule" />
         <span className="sub">a town of people with fly brains</span>
       </div>
@@ -128,6 +132,11 @@ export function TopBar() {
   let males = 0;
   for (const c of citizens) if (c.sex === 'male') males++;
   const females = citizens.length - males;
+  // the clock string only changes once per game minute; nothing re-mounts
+  const clock = fmtClock(timeOfDay);
+  // perf digits at 2 Hz so they read as an instrument, not a flicker
+  const fpsShown = useThrottled(Math.round(fps), 500);
+  const perfShown = useThrottled(perf, 500);
   const live = selectedId === null ? 0 : Math.min(1, spikeCount / 120);
 
   return (
@@ -138,8 +147,8 @@ export function TopBar() {
         <div className="daytime" title="Time of day in Flytown">
           <DayArc hour={timeOfDay} />
           <div className="t">
-            <FlipNum value={fmtClock(timeOfDay)} />
-            <span className="d">Day <FlipNum value={day} className="d" /></span>
+            <span className="num clock">{clock}</span>
+            <span className="d">Day <span className="num d">{day}</span></span>
           </div>
         </div>
       </div>
@@ -175,11 +184,11 @@ export function TopBar() {
       </div>
 
       <div className="chip hide-md" title="fps · simulation ms per brain ms · active neurons">
-        <span className="num">{fps.toFixed(0)}</span><span>fps</span>
+        <span className="num w3">{fpsShown}</span><span>fps</span>
         <span className="sep" />
-        <span className="num">{perf ? perf.msPerSimMs.toFixed(2) : '–'}</span><span>ms</span>
+        <span className="num w4">{perfShown ? perfShown.msPerSimMs.toFixed(2) : '–'}</span><span>ms</span>
         <span className="sep" />
-        <span className="num">{perf ? fmtInt(perf.activeNeurons) : '–'}</span><span>active</span>
+        <span className="num w6">{perfShown ? fmtInt(perfShown.activeNeurons) : '–'}</span><span>active</span>
       </div>
 
       <div className="seg" role="group" aria-label="Camera">

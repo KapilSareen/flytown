@@ -1,14 +1,16 @@
 // world.ts: the simulation owner. Fixed-step 60 Hz loop driven by requestAnimationFrame,
 // world-speed multiplier and pause from the store, brain stepping through the adapter,
-// action consequences (fights, courtship, bonds, eating, sleeping), navigation and the
-// WorldApi used by the HUD. Publishes snapshots to the zustand store at ~12 Hz.
+// drives (drives.ts) -> goal selection and goal state machines (goals.ts) -> locomotion
+// (here), body state, the WorldApi used by the HUD, and ~12 Hz snapshots into the store.
+// See docs/RENDER_API.md for what renderers read from here.
 
 import { NI, type InjectTarget, type InputChannel, type Sex } from '../brain/types';
-import { setWorldApi, useStore, type Action, type CitizenView, type EventKind, type WorldApi } from '../store';
-import { ACT, OUT, byId, decide } from './actions';
-import { BODY, clamp01, createAgent, updateBody, type Agent } from './agent';
+import { setWorldApi, useStore, type Action, type CitizenView, type WorldApi } from '../store';
+import { createAgent, updateBody, type Agent } from './agent';
 import { loadBrain, type Brain } from './brainAdapter';
-import { buildCity, randomWalkable, rng, walkable, type City, type Poi, type Pt } from './city';
+import { buildCity, randomWalkable, rng, walkable, type City, type Pt } from './city';
+import { applyDriveProfile, updateDrives } from './drives';
+import { abortGoal, applyGoalProfile, riotChain, selectGoal, startGoal, thoughtOf, updateGoal } from './goals';
 import { findPath, lineOfSight } from './pathing';
 import { daylightAt, senseInputs } from './senses';
 
@@ -21,18 +23,14 @@ export const WORLD = {
   maxFrameDt: 0.1,
   gameDayRealSec: 360,        // a game day is 6 real minutes at speed 1
   hoursPerSec: 24 / 360,
-  maxSpeed: 80,               // px/s at walk output 1
-  turnRate: 4.0,              // rad/s toward the path
-  brainTurnRate: 1.6,         // rad/s per unit of (steerR - steerL)
-  escapeSpeed: 2.3,           // x maxSpeed
-  fightLunge: 1.4,
-  courtSpeed: 0.7,
-  bondSpeed: 0.55,
-  bondSeconds: 60,
-  arriveDist: 14,
+  maxSpeed: 80,               // px/s at pace 1
+  turnRate: 5.0,              // rad/s toward the path
+  nudgeRad: 0.26,             // +-15 degrees of brain steering on a stroll
   publishHz: 12,
   citizens: 14,
 };
+
+export const POP = { frameBudgetMs: 8, perWorkerGuess: 10, hardMax: 200, mockMax: 60 };
 
 export interface WorldState {
   city: City;
@@ -42,40 +40,48 @@ export interface WorldState {
   hour: number;               // 0..24
   day: number;
   daylight: number;
-  fx: Fx[];
+  fx: Fx[];                   // one-shot effects queue; the renderer drains it each frame
   fps: number;
   ready: boolean;
-  // loop scratch state (kept here so the step is callable headlessly, e.g. from tests)
-  inputsMap: Map<number, Float32Array>;
-  fights: Fight[];
+  /** True when the manifest's courtship readout is entirely male-only (silenced in female bodies). */
+  femaleCourtshipSilenced: boolean;
+  seatOwner: (number | null)[];            // occupant id per city.seats index
+  rand: () => number;
+  inputsMap: Map<number, Float32Array>;   // loop scratch (kept here so stepWorld is callable headlessly)
 }
-
-interface Fight { a: number; b: number; resolveAt: number }
 
 let world: WorldState | null = null;
 export const getWorld = () => world;
 
-const rand = rng(1234);
 let nextId = 1;
 const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 
-/** Boot the world: city, agents, brain, loop, WorldApi. Idempotent. */
-export async function startWorld(): Promise<WorldState> {
+/** Boot the world: city, agents, brain, loop, WorldApi. Idempotent. `opts` are for tests. */
+export async function startWorld(opts: { brain?: Brain; loop?: boolean; population?: number } = {}): Promise<WorldState> {
   if (world) return world;
   const city = buildCity(7);
   const w: WorldState = {
     city, agents: [], brain: null, time: 0, hour: useStore.getState().timeOfDay, day: 1,
     daylight: daylightAt(useStore.getState().timeOfDay), fx: [], fps: 0, ready: false,
-    inputsMap: new Map(), fights: [],
+    femaleCourtshipSilenced: false, seatOwner: new Array<number | null>(city.seats.length).fill(null),
+    rand: rng(1234), inputsMap: new Map(),
   };
   world = w;
   const store = useStore.getState();
 
-  const brain = await loadBrain((phase, progress) => useStore.getState().set({ loading: { phase, progress } }));
+  const brain = opts.brain ?? await loadBrain((phase, progress) => useStore.getState().set({ loading: { phase, progress } }));
   w.brain = brain;
-  if (brain.manifest) store.set({ manifest: brain.manifest });
+  applyDriveProfile(brain.kind);
+  applyGoalProfile(brain.kind);
+  if (brain.manifest) {
+    store.set({ manifest: brain.manifest });
+    const mo = new Set(brain.manifest.sexSpecific?.maleOnly ?? []);
+    const c = brain.manifest.channels.outputs.courtship?.neurons ?? [];
+    w.femaleCourtshipSilenced = c.length > 0 && c.every(n => mo.has(n));
+    if (w.femaleCourtshipSilenced) console.info('[drosopolis] courtship readout is male-only; female receptivity uses the no-flee proxy');
+  }
 
   // Initial population: ?pop=24&female=0.5 (defaults 14 / 0.5), clamped to the capacity estimate.
   const params = new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
@@ -83,22 +89,34 @@ export async function startWorld(): Promise<WorldState> {
   const femaleRatio = clamp(Number(params.get('female')) || 0.5, 0, 1);
   const cap = estimateCapacity(w, store.brainSpeed);
   store.set({ maxPopulation: cap });
-  const n = clamp(Math.round(wantPop), 2, cap);
+  const n = opts.population ?? clamp(Math.round(wantPop), 2, cap);
   for (let i = 0; i < n; i++) spawn(w, i < Math.round(n * femaleRatio) ? 'female' : 'male');
 
   registerApi(w);
   w.ready = true;
   store.set({ ready: true, loading: { phase: brain.kind === 'lif' ? 'Brains online' : 'Mock brains online', progress: 1 } });
   store.pushEvent({ kind: 'info', text: brain.kind === 'lif' ? 'MaleCNS kernels running.' : 'Running with the mock brain (no kernel found).', actors: [] });
-  runLoop(w);
+  if (opts.loop !== false) runLoop(w);
   return w;
+}
+
+/** The sidewalk spot in front of a random house: this citizen's home. */
+function pickHome(w: WorldState): Pt {
+  const houses = w.city.buildings.filter(b => b.kind === 'house');
+  const h = houses[Math.floor(w.rand() * houses.length)];
+  const dir = h.door.y === h.y ? -1 : 1;                 // step outward from the door until walkable
+  for (let d = 12; d < 60; d += 6) {
+    const p = { x: h.door.x, y: h.door.y + dir * d };
+    if (walkable(w.city, p.x, p.y)) return p;
+  }
+  return randomWalkable(w.city, w.rand, h.door, 60);
 }
 
 function spawn(w: WorldState, sex: Sex): Agent {
   const spots: Pt[] = [w.city.plazaCenter, w.city.parkCenter, ...w.city.food, w.city.bar];
-  const near = spots[Math.floor(rand() * spots.length)];
-  const pos = randomWalkable(w.city, rand, near, 140);
-  const a = createAgent(nextId++, sex, pos, rand, w.time);
+  const near = spots[Math.floor(w.rand() * spots.length)];
+  const pos = randomWalkable(w.city, w.rand, near, 140);
+  const a = createAgent(nextId++, sex, pos, pickHome(w), w.rand, w.time);
   w.agents.push(a);
   w.brain?.addAgent({ id: a.id, sex: a.sex, seed: a.seed });
   return a;
@@ -107,6 +125,7 @@ function spawn(w: WorldState, sex: Sex): Agent {
 function removeAgent(w: WorldState, id: number) {
   const i = w.agents.findIndex(a => a.id === id);
   if (i < 0) return;
+  abortGoal(w, w.agents[i]);
   w.agents.splice(i, 1);
   w.brain?.removeAgent(id);
   for (const o of w.agents) {
@@ -119,8 +138,6 @@ function removeAgent(w: WorldState, id: number) {
 }
 
 // ---- population / capacity ------------------------------------------------------------
-export const POP = { frameBudgetMs: 8, perWorkerGuess: 10, hardMax: 200, mockMax: 60 };
-
 /**
  * How many citizens the brain can step while staying under ~8 ms of brain work per frame.
  * Before any perf report: workers x 10. After: derived from measured ms per simulated ms.
@@ -133,7 +150,6 @@ function estimateCapacity(w: WorldState, brainSpeed: number): number {
   const workers = b.workers;
   let cap = workers * POP.perWorkerGuess;
   if (perf && perf.agents > 0 && perf.msPerSimMs > 0) {
-    // msPerSimMs is for the slowest worker with ~agents/workers citizens on it.
     const agentsPerWorker = Math.max(1, Math.ceil(perf.agents / workers));
     const perAgentMsPerSimMs = perf.msPerSimMs / agentsPerWorker;
     const simMsPerFrame = (1000 / 60) * Math.max(0.01, brainSpeed);
@@ -149,11 +165,8 @@ function setPopulation(w: WorldState, n: number, femaleRatio?: number) {
   const target = clamp(Math.round(n), 2, s.maxPopulation);
   const females = () => w.agents.filter(a => a.sex === 'female').length;
   const ratio = femaleRatio ?? (w.agents.length ? females() / w.agents.length : 0.5);
-  while (w.agents.length < target) {
-    spawn(w, females() < Math.round((w.agents.length + 1) * ratio) ? 'female' : 'male');
-  }
+  while (w.agents.length < target) spawn(w, females() < Math.round((w.agents.length + 1) * ratio) ? 'female' : 'male');
   while (w.agents.length > target) {
-    // most recently spawned first, never the selected/followed citizen, prefer the over-represented sex
     const protectedIds = new Set([s.selectedId, s.followId]);
     const overFemale = females() > Math.round((w.agents.length - 1) * ratio);
     const candidates = [...w.agents].reverse().filter(a => !protectedIds.has(a.id));
@@ -166,26 +179,18 @@ function setPopulation(w: WorldState, n: number, femaleRatio?: number) {
 // ---- main loop -----------------------------------------------------------------------
 function runLoop(w: WorldState) {
   let last = performance.now();
-  let acc = 0;
-  let fpsAcc = 0, fpsN = 0;
-  let publishAcc = 0;
-  let capAcc = 0;
-
+  let acc = 0, fpsAcc = 0, fpsN = 0, publishAcc = 0, capAcc = 0;
   const frame = (now: number) => {
     const real = Math.min(WORLD.maxFrameDt, (now - last) / 1000);
     last = now;
     fpsAcc += real; fpsN++;
     if (fpsAcc >= 0.5) { w.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
-
     const s = useStore.getState();
     if (!s.paused) {
       acc += real * s.speed;
       let steps = 0;
-      while (acc >= WORLD.stepDt && steps < 12) {
-        stepWorld(w, WORLD.stepDt, s.brainSpeed);
-        acc -= WORLD.stepDt; steps++;
-      }
-      if (steps === 12) acc = 0; // too far behind: drop time rather than spiral
+      while (acc >= WORLD.stepDt && steps < 12) { stepWorld(w, WORLD.stepDt, s.brainSpeed); acc -= WORLD.stepDt; steps++; }
+      if (steps === 12) acc = 0;
     }
     publishAcc += real;
     if (publishAcc >= 1 / WORLD.publishHz) { publishAcc = 0; publish(w); }
@@ -193,7 +198,7 @@ function runLoop(w: WorldState) {
     if (capAcc >= 2) {
       capAcc = 0;
       const cap = estimateCapacity(w, s.brainSpeed);
-      if (Math.abs(cap - s.maxPopulation) > 2) s.set({ maxPopulation: cap });   // hysteresis: no flapping
+      if (Math.abs(cap - s.maxPopulation) > 2) s.set({ maxPopulation: cap });
     }
     requestAnimationFrame(frame);
   };
@@ -202,14 +207,14 @@ function runLoop(w: WorldState) {
 
 /** Advance the world by dt seconds (one fixed step). Exported for headless tests. */
 export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
-  const { inputsMap, fights } = w;
+  const { inputsMap } = w;
   w.time += dt;
   w.hour += dt * WORLD.hoursPerSec;
   if (w.hour >= 24) { w.hour -= 24; w.day++; }
   w.daylight = daylightAt(w.hour);
   const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
 
-  // 1. Senses -> brain.
+  // 1. Senses -> brain -> drives.
   for (const a of w.agents) {
     senseInputs(ctx, a, a.inputs);
     let buf = inputsMap.get(a.id);
@@ -221,120 +226,117 @@ export function stepWorld(w: WorldState, dt: number, brainSpeed: number) {
   for (const a of w.agents) {
     const o = w.brain?.getOutputs(a.id);
     if (o) a.outputs.set(o);
+    a.mood = clamp(a.mood + (w.rand() - 0.5) * 0.04 * Math.sqrt(dt) + (0.5 - a.mood) * 0.02 * dt, 0, 1);
+    updateDrives(a, w.hour, w.daylight, dt, w.femaleCourtshipSilenced);
   }
 
-  // 2. Decide and act.
+  // 2. Goals: select (hysteresis + commitment), run the active goal, then move.
   for (const a of w.agents) {
     const prevAction = a.action;
-    const intent = decide(ctx, a);
-    let action: Action = intent.action;
-
-    // Sleep needs a bench: walk there first (displayed as walking).
-    if (action === 'sleep') {
-      if (!a.sleepSpot) a.sleepSpot = nearestBench(w.city, a) ?? { x: a.x, y: a.y };
-      if (dist(a, a.sleepSpot) > 22) { setGoal(w, a, a.sleepSpot, 'bench'); action = 'walk'; }
-    } else if (prevAction === 'sleep') a.sleepSpot = null;
-
-    if (w.time < a.hurtUntil && action !== 'escape') action = 'hurt';
-    if (action !== prevAction) onActionStart(w, a, action, prevAction, fights);
+    riotChain(w, a);
+    selectGoal(w, a);
+    updateGoal(w, a, dt);
+    if (!a.goal) { selectGoal(w, a); updateGoal(w, a, dt); }
+    let action: Action = a.action;
+    if (w.time < a.hurtUntil && action !== 'fight' && action !== 'escape') { action = 'hurt'; a.actionPhase = 'hurt'; }
+    if (action !== prevAction) a.actionSince = w.time;
     a.action = action;
-    a.actionSince = action !== prevAction ? w.time : a.actionSince;
-
-    moveAgent(w, a, intent, dt);
+    a.actionT = w.time - a.actionSince;
+    moveAgent(w, a, dt);
+    a.facing = a.face ? Math.atan2(a.face.y - a.y, a.face.x - a.x) : a.heading;
+    a.speedNorm = clamp(Math.abs(a.speed) / WORLD.maxSpeed, 0, 2.5);
+    if (a.godReceptive > 0 && w.time > a.godReceptive) a.godReceptive = 0;
   }
 
-  // 3. Interactions with consequences.
-  resolveFights(w, fights);
-  courtship(w, dt);
+  // 3. Bond expiry, separation, body.
   for (const a of w.agents) {
     if (a.bondWith !== null && w.time > a.bondUntil) {
-      const p = byId(ctx, a.bondWith);
+      const p = w.agents.find(o => o.id === a.bondWith);
       a.bondWith = null;
       if (p) p.bondWith = null;
     }
   }
   separate(w);
-  // 4. Body.
-  for (const a of w.agents) updateBody(a, dt, w.daylight, a.action === 'walk' || a.action === 'court' ? Math.abs(a.speed) * dt : 0);
+  for (const a of w.agents) updateBody(a, dt, w.daylight, a.action === 'walk' ? Math.abs(a.speed) * dt : 0);
 }
 
-// ---- movement ------------------------------------------------------------------------
-function moveAgent(w: WorldState, a: Agent, intent: { speed: number; turn: number; target: number | null }, dt: number) {
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
+// ---- locomotion ----------------------------------------------------------------------
+// Executes the agent's motion request: steady pace along an A* path (with an optional
+// +-15 degree brain nudge on strolls), precise stops, straight lunges, dashes and orbits.
+function moveAgent(w: WorldState, a: Agent, dt: number) {
   const ox = a.x, oy = a.y;
-  let desiredHeading = a.heading;
+  const m = a.motion;
   let speed = 0;
-  let follow = false;      // whether the heading should be steered toward a goal
+  let desired = a.heading;
+  let steer = false;
+  const brainTurn = a.outputs[2] - a.outputs[1];      // steerR - steerL
+  a.turnBias += (brainTurn - a.turnBias) * Math.min(1, dt / 4);
 
-  switch (a.action) {
-    case 'walk': {
-      updateGoal(w, a);
-      const wp = nextWaypoint(w, a);
+  switch (m.mode) {
+    case 'stand': {
+      if (a.face) { desired = Math.atan2(a.face.y - a.y, a.face.x - a.x); steer = true; }
+      break;
+    }
+    case 'path': {
+      const dTarget = dist(a, m.target);
+      if (dTarget <= m.arrive) { a.arrived = true; a.motion = { mode: 'stand' }; break; }
+      const wp = nextWaypoint(w, a, m.target);
       if (wp) {
-        desiredHeading = Math.atan2(wp.y - a.y, wp.x - a.x);
-        follow = true;
-      }
-      const bonded = a.bondWith !== null;
-      speed = WORLD.maxSpeed * clamp(intent.speed, 0.2, 1) * (bonded ? WORLD.bondSpeed / 0.6 : 1);
-      if (!wp) speed *= 0.35;
-      break;
-    }
-    case 'court': {
-      const t = byId(ctx, a.target);
-      if (t) { desiredHeading = Math.atan2(t.y - a.y, t.x - a.x); follow = true; speed = WORLD.maxSpeed * WORLD.courtSpeed; }
-      break;
-    }
-    case 'sing': {
-      const t = byId(ctx, a.target);
-      if (t) { desiredHeading = Math.atan2(t.y - a.y, t.x - a.x); follow = true; }
-      break;
-    }
-    case 'fight': {
-      const t = byId(ctx, a.target);
-      if (t) {
-        desiredHeading = Math.atan2(t.y - a.y, t.x - a.x); follow = true;
-        if (dist(a, t) > 18) speed = WORLD.maxSpeed * WORLD.fightLunge;
+        desired = Math.atan2(wp.y - a.y, wp.x - a.x);
+        if (m.nudge) desired += clamp(brainTurn - a.turnBias, -1, 1) * WORLD.nudgeRad;
+        desired += sidestep(w, a, desired);
+        steer = true;
+        speed = WORLD.maxSpeed * m.pace * clamp(dTarget / 40, 0.35, 1);   // ease in for a precise stop
+      } else {
+        a.arrived = true; a.motion = { mode: 'stand' };                     // unreachable: give up gracefully
       }
       break;
     }
-    case 'escape': {
-      const from = a.escapeFrom ?? { x: a.x - Math.cos(a.heading), y: a.y - Math.sin(a.heading) };
-      desiredHeading = Math.atan2(a.y - from.y, a.x - from.x); follow = true;
-      speed = WORLD.maxSpeed * WORLD.escapeSpeed;
+    case 'direct': {
+      const d = dist(a, m.target);
+      if (d <= m.arrive) { a.arrived = true; a.motion = { mode: 'stand' }; break; }
+      desired = Math.atan2(m.target.y - a.y, m.target.x - a.x); steer = true;
+      speed = WORLD.maxSpeed * m.pace;
       break;
     }
-    case 'backup': speed = -WORLD.maxSpeed * 0.45; break;
-    default: speed = 0;
+    case 'dash': {
+      desired = Math.atan2(a.y - m.from.y, a.x - m.from.x); steer = true;
+      speed = WORLD.maxSpeed * m.pace;
+      break;
+    }
+    case 'orbit': {
+      m.angle += 1.6 * dt;
+      const px = m.center.x + Math.cos(m.angle) * m.radius, py = m.center.y + Math.sin(m.angle) * m.radius;
+      const d = Math.hypot(px - a.x, py - a.y);
+      if (d > 3) { desired = Math.atan2(py - a.y, px - a.x); steer = true; speed = Math.min(WORLD.maxSpeed * m.pace, d * 6); }
+      a.face = m.center;
+      break;
+    }
   }
 
-  // Heading: path steering dominates when off-course; brain steering adds the wobble.
-  let turn = intent.turn * WORLD.brainTurnRate;
-  if (follow) {
-    const diff = wrapAngle(desiredHeading - a.heading);
-    turn += clamp(diff * 3, -WORLD.turnRate, WORLD.turnRate) * (a.action === 'escape' ? 3 : 1);
+  if (steer) {
+    const diff = wrapAngle(desired - a.heading);
+    const rate = m.mode === 'dash' ? WORLD.turnRate * 3 : m.mode === 'stand' ? WORLD.turnRate * 1.5 : WORLD.turnRate;
+    a.heading = wrapAngle(a.heading + clamp(diff * 4, -rate, rate) * dt);
+    if (m.mode === 'path' && Math.abs(diff) > 1.2) speed *= 0.25;     // turn first, then go
   }
-  if (Math.abs(speed) > 0 || follow) a.heading = wrapAngle(a.heading + turn * dt);
 
-  // Reactive obstacle avoidance: probe ahead and rotate to a free direction if needed.
-  if (speed > 0) {
-    const probe = 22;
+  // Reactive obstacle avoidance for straight-line motions (paths already avoid buildings).
+  if (speed > 0 && (m.mode === 'dash' || m.mode === 'direct' || m.mode === 'orbit')) {
+    const probe = 18;
     const free = (h: number) => walkable(w.city, a.x + Math.cos(h) * probe, a.y + Math.sin(h) * probe);
     if (!free(a.heading)) {
-      const offs = [0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.2, -2.2, Math.PI];
       let found = false;
-      for (const o of offs) { if (free(a.heading + o)) { a.heading = wrapAngle(a.heading + o * Math.min(1, 8 * dt) ); found = true; break; } }
+      for (const o of [0.6, -0.6, 1.2, -1.2, 2.0, -2.0, Math.PI]) { if (free(a.heading + o)) { a.heading = wrapAngle(a.heading + o); found = true; break; } }
       if (!found) speed = 0;
-      if (a.action === 'walk') a.stuckFor += dt;
     }
   }
 
-  // Integrate with axis-separated collision against blocked cells.
   const nx = a.x + Math.cos(a.heading) * speed * dt;
   const ny = a.y + Math.sin(a.heading) * speed * dt;
   if (walkable(w.city, nx, ny)) { a.x = nx; a.y = ny; }
   else if (walkable(w.city, nx, a.y)) { a.x = nx; }
   else if (walkable(w.city, a.x, ny)) { a.y = ny; }
-  else if (a.action === 'walk') a.stuckFor += dt;
   a.x = clamp(a.x, 8, w.city.w - 8);
   a.y = clamp(a.y, 8, w.city.h - 8);
 
@@ -342,191 +344,100 @@ function moveAgent(w: WorldState, a: Agent, intent: { speed: number; turn: numbe
   a.vx = (a.x - ox) / dt;
   a.vy = (a.y - oy) / dt;
 
-  if (a.action === 'walk') {
-    if (Math.hypot(a.x - ox, a.y - oy) > 0.5) a.stuckFor = Math.max(0, a.stuckFor - dt * 0.5);
-    if (a.stuckFor > 1.2) { a.stuckFor = 0; a.path = null; a.goal = null; }
-  }
-}
-
-// ---- navigation ----------------------------------------------------------------------
-function nearestBench(city: City, p: Pt): Poi | null {
-  let best: Poi | null = null, bd = Infinity;
-  for (const b of city.benches) { const d = dist(b, p); if (d < bd) { bd = d; best = b; } }
-  return best;
-}
-function nearestFood(city: City, p: Pt): Poi {
-  let best = city.food[0], bd = Infinity;
-  for (const f of city.food) { const d = dist(f, p); if (d < bd) { bd = d; best = f; } }
-  return best;
-}
-
-function setGoal(w: WorldState, a: Agent, goal: Pt, kind: string) {
-  if (a.goal && a.goalKind === kind && dist(a.goal, goal) < 30) return;
-  a.goal = goal; a.goalKind = kind; a.goalUntil = w.time + 45; a.path = null; a.pathIdx = 0; a.idleUntil = 0;
-}
-
-/** Pick a destination when the agent has none: needs first, then a weighted wander. */
-function updateGoal(w: WorldState, a: Agent) {
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
-  // Bonded followers trail their partner.
-  if (a.bondWith !== null) {
-    const p = byId(ctx, a.bondWith);
-    if (p && a.id > p.id) {
-      if (dist(a, p) > 34) setGoal(w, a, { x: p.x, y: p.y }, 'partner'); else { a.goal = null; a.path = null; }
-      return;
+  // stuck detection on paths: re-plan once, then give up
+  if (m.mode === 'path' && speed > 0) {
+    if (Math.hypot(a.x - ox, a.y - oy) < speed * dt * 0.3) a.stuckFor += dt; else a.stuckFor = Math.max(0, a.stuckFor - dt);
+    if (a.stuckFor > 1.0) {
+      a.stuckFor = 0; a.path = null; a.pathTarget = null;
+      if ((a.cooldown.replan ?? -1e9) > w.time - 4) { a.arrived = true; a.motion = { mode: 'stand' }; }
+      a.cooldown.replan = w.time;
     }
   }
-  if (a.goal && w.time < a.goalUntil) return;
-  if (w.time < a.idleUntil) { a.goal = null; return; }
-  const c = w.city, b = a.body;
-  const r = rand();
-  let goal: Pt, kind = 'wander';
-  const evening = w.hour >= 19 && w.hour < 23.5;
-  if (b.hunger > 0.55 && r < 0.85) { goal = nearestFood(c, a); kind = 'food'; }
-  else if (w.daylight < 0.35 && b.energy < 0.45 && r < 0.8) { goal = nearestBench(c, a) ?? c.plazaCenter; kind = 'bench'; }
-  else if (evening && r < 0.5) { goal = randomWalkable(c, rand, c.bar, 50); kind = 'bar'; }
-  else if (r < 0.22) { goal = randomWalkable(c, rand, c.parkCenter, 150); kind = 'park'; }
-  else if (r < 0.44) { goal = randomWalkable(c, rand, c.plazaCenter, 140); kind = 'plaza'; }
-  else if (r < 0.56) { goal = c.food[Math.floor(rand() * c.food.length)]; kind = 'food'; }
-  else if (r < 0.62) { goal = randomWalkable(c, rand, c.garbage[0], 40); kind = 'garbage'; }
-  else { goal = randomWalkable(c, rand); }
-  setGoal(w, a, goal, kind);
 }
 
-/** Current waypoint, planning lazily. Returns null when at the goal (and starts lingering). */
-function nextWaypoint(w: WorldState, a: Agent): Pt | null {
-  if (!a.goal) return null;
-  if (!a.path) {
-    a.path = findPath(w.city, a, a.goal);
+/** Current waypoint toward `target`, planning lazily (and re-planning when the target moves). */
+function nextWaypoint(w: WorldState, a: Agent, target: Pt): Pt | null {
+  if (!a.path || !a.pathTarget || dist(a.pathTarget, target) > 12) {
+    a.path = findPath(w.city, a, target);
+    a.pathTarget = { x: target.x, y: target.y };
     a.pathIdx = 0;
-    if (!a.path) { a.goal = null; return null; }
+    if (!a.path) return null;
   }
-  while (a.pathIdx < a.path.length && dist(a, a.path[a.pathIdx]) < WORLD.arriveDist) a.pathIdx++;
-  if (a.pathIdx >= a.path.length) {
-    // arrived: linger depending on the venue
-    const linger = a.goalKind === 'bar' ? 10 + rand() * 20 : a.goalKind === 'food' ? 3 + rand() * 6 : a.goalKind === 'partner' ? 0 : 1.5 + rand() * 6;
-    a.idleUntil = w.time + linger;
-    a.goal = null; a.path = null;
-    return null;
-  }
-  // If the direct line to a later waypoint is free, skip ahead (keeps paths natural after
-  // brain-driven deviations).
+  while (a.pathIdx < a.path.length - 1 && dist(a, a.path[a.pathIdx]) < 12) a.pathIdx++;
   if (a.pathIdx + 1 < a.path.length && lineOfSight(w.city, a, a.path[a.pathIdx + 1])) a.pathIdx++;
-  return a.path[a.pathIdx];
+  return a.path[Math.min(a.pathIdx, a.path.length - 1)];
 }
 
-/** Soft separation so citizens do not stack. */
+/** Lateral steering away from a citizen ahead (the walker sidesteps; standers hold). */
+function sidestep(w: WorldState, a: Agent, desired: number): number {
+  const cx = Math.cos(desired), cy = Math.sin(desired);
+  let turn = 0;
+  for (const o of w.agents) {
+    if (o === a) continue;
+    const dx = o.x - a.x, dy = o.y - a.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 34 || d < 1e-3) continue;
+    const ahead = (dx * cx + dy * cy) / d;
+    if (ahead < 0.6) continue;
+    const side = cx * dy - cy * dx;              // >0: they are on my right -> step left
+    turn += (side > 0 ? -1 : 1) * 0.6 * (1 - d / 34);
+  }
+  return clamp(turn, -0.8, 0.8);
+}
+
+const seated = (a: Agent) => a.seat !== null && a.motion.mode === 'stand';
+
+/** Hard separation with yielding: walkers take the push, standers hold, seated diners are immovable. */
 function separate(w: WorldState) {
   const ag = w.agents;
-  for (let i = 0; i < ag.length; i++) {
-    for (let j = i + 1; j < ag.length; j++) {
-      const a = ag[i], b = ag[j];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const d = Math.hypot(dx, dy);
-      const min = a.radius + b.radius;
-      if (d > 0 && d < min) {
-        const push = (min - d) / 2 * 0.5;
+  for (let iter = 0; iter < 2; iter++) {
+    for (let i = 0; i < ag.length; i++) {
+      for (let j = i + 1; j < ag.length; j++) {
+        const a = ag[i], b = ag[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d < 1e-3) { dx = 1; dy = 0; d = 1; }
+        const min = a.radius + b.radius;
+        if (d >= min) continue;
+        const overlap = min - d;
+        const wa = seated(a) ? 0 : Math.abs(a.speed) + 0.1, wb = seated(b) ? 0 : Math.abs(b.speed) + 0.1;
+        const sum = wa + wb || 1;
+        const sa = wa / sum, sb = wb / sum;      // the one moving faster yields more
         const ux = dx / d, uy = dy / d;
-        if (walkable(w.city, a.x - ux * push, a.y - uy * push)) { a.x -= ux * push; a.y -= uy * push; }
-        if (walkable(w.city, b.x + ux * push, b.y + uy * push)) { b.x += ux * push; b.y += uy * push; }
+        a.x -= ux * overlap * sa; a.y -= uy * overlap * sa;
+        b.x += ux * overlap * sb; b.y += uy * overlap * sb;
       }
     }
+    for (const a of ag) clampToObstacles(w, a);
   }
 }
 
-// ---- consequences --------------------------------------------------------------------
-function throttledEvent(w: WorldState, a: Agent, key: string, every: number, kind: EventKind, text: string, actors: number[]) {
-  const t = a.lastEventAt[key] ?? -1e9;
-  if (w.time - t < every) return;
-  a.lastEventAt[key] = w.time;
-  useStore.getState().pushEvent({ kind, text, actors });
-}
+const BODY_R = 8;   // body radius against props (a little smaller than the citizen circle, so they can hug walls)
 
-function onActionStart(w: WorldState, a: Agent, action: Action, prev: Action, fights: Fight[]) {
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
-  switch (action) {
-    case 'eat': throttledEvent(w, a, 'eat', 25, 'eat', `${a.name} is eating at ${nearestFood(w.city, a).name}.`, [a.id]); break;
-    case 'groom': throttledEvent(w, a, 'groom', 40, 'groom', `${a.name} stops to groom.`, [a.id]); w.fx.push({ kind: 'puff', x: a.x, y: a.y, id: a.id }); break;
-    case 'sleep': throttledEvent(w, a, 'sleep', 60, 'sleep', `${a.name} falls asleep on a bench.`, [a.id]); break;
-    case 'escape': throttledEvent(w, a, 'escape', 8, 'escape', `${a.name} bolts.`, [a.id]); break;
-    case 'sing': {
-      const t = byId(ctx, a.target);
-      if (t) throttledEvent(w, a, 'sing', 15, 'sing', `${a.name} sings to ${t.name}.`, [a.id, t.id]);
-      break;
-    }
-    case 'fight': {
-      const t = byId(ctx, a.target);
-      if (t && prev !== 'fight' && !fights.some(f => (f.a === a.id && f.b === t.id) || (f.a === t.id && f.b === a.id))) {
-        // The target is pulled into the fight.
-        if (t.action !== 'fight') { t.action = 'fight'; t.target = a.id; t.lockUntil = w.time + ACT.fightLock; t.actionSince = w.time; }
-        fights.push({ a: a.id, b: t.id, resolveAt: w.time + ACT.fightLock });
-        useStore.getState().pushEvent({ kind: 'fight', text: `${a.name} and ${t.name} are fighting!`, actors: [a.id, t.id] });
-      }
-      break;
+/** Push the citizen out of any obstacle it penetrates. Seated diners ignore their own table. */
+function clampToObstacles(w: WorldState, a: Agent) {
+  const mySeat = a.seat !== null ? w.city.seats[a.seat] : null;
+  for (const o of w.city.obstacles) {
+    if (o.kind === 'circle') {
+      if (o.tag === 'table' && mySeat && o.venue === mySeat.venue && o.table === mySeat.table) continue;
+      const dx = a.x - o.x, dy = a.y - o.y;
+      const d = Math.hypot(dx, dy);
+      const min = o.r + BODY_R;
+      if (d >= min) continue;
+      if (d < 1e-3) { a.x = o.x + min; continue; }
+      a.x = o.x + dx / d * min; a.y = o.y + dy / d * min;
+    } else {
+      if (o.tag === 'stall' && mySeat && mySeat.standing) continue;
+      const x0 = o.x - BODY_R, y0 = o.y - BODY_R, x1 = o.x + o.w + BODY_R, y1 = o.y + o.h + BODY_R;
+      if (a.x <= x0 || a.x >= x1 || a.y <= y0 || a.y >= y1) continue;
+      // smallest penetration axis
+      const pl = a.x - x0, pr = x1 - a.x, pt = a.y - y0, pb = y1 - a.y;
+      const m = Math.min(pl, pr, pt, pb);
+      if (m === pl) a.x = x0; else if (m === pr) a.x = x1; else if (m === pt) a.y = y0; else a.y = y1;
     }
   }
-}
-
-function resolveFights(w: WorldState, fights: Fight[]) {
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
-  for (let i = fights.length - 1; i >= 0; i--) {
-    const f = fights[i];
-    if (w.time < f.resolveAt) continue;
-    fights.splice(i, 1);
-    const a = byId(ctx, f.a), b = byId(ctx, f.b);
-    if (!a || !b) continue;
-    a.body.injury = clamp01(a.body.injury + BODY.injuryPerHit);
-    b.body.injury = clamp01(b.body.injury + BODY.injuryPerHit);
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    w.fx.push({ kind: 'sparks', x: mx, y: my });
-    // knockback
-    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
-    const kb = 16;
-    if (walkable(w.city, a.x - dx / d * kb, a.y - dy / d * kb)) { a.x -= dx / d * kb; a.y -= dy / d * kb; }
-    if (walkable(w.city, b.x + dx / d * kb, b.y + dy / d * kb)) { b.x += dx / d * kb; b.y += dy / d * kb; }
-    const scoreA = a.outputs[OUT.aggression] + rand() * 0.3 - a.body.injury * 0.5;
-    const scoreB = b.outputs[OUT.aggression] + rand() * 0.3 - b.body.injury * 0.5;
-    const [winner, loser] = scoreA >= scoreB ? [a, b] : [b, a];
-    loser.escapeFrom = { x: winner.x, y: winner.y };
-    loser.escapeUntil = w.time + 0.9;
-    loser.hurtUntil = w.time + 0.45;
-    loser.lockUntil = 0;
-    winner.hurtUntil = w.time + 0.25;
-    winner.lockUntil = w.time + 0.4;
-    winner.target = null;
-    useStore.getState().pushEvent({ kind: 'fight', text: `${winner.name} wins; ${loser.name} retreats.`, actors: [winner.id, loser.id] });
-  }
-}
-
-function courtship(w: WorldState, dt: number) {
-  const ctx = { agents: w.agents, city: w.city, now: w.time, daylight: w.daylight };
-  const receptive = new Set<number>();
-  for (const a of w.agents) {
-    if (a.action !== 'sing' || a.target === null) continue;
-    const t = byId(ctx, a.target);
-    if (!t || dist(a, t) > ACT.singRange + 10) continue;
-    t.singHeardUntil = w.time + 0.35;
-    t.singFrom = a.id;
-    if (t.outputs[OUT.courtship] > 0.35) {
-      t.receptiveFor += dt;
-      receptive.add(t.id);
-      if (t.receptiveFor >= 2 && a.bondWith === null && t.bondWith === null) bond(w, a, t);
-    }
-  }
-  for (const a of w.agents) if (!receptive.has(a.id)) a.receptiveFor = Math.max(0, a.receptiveFor - dt * 1.5);
-}
-
-function bond(w: WorldState, a: Agent, b: Agent) {
-  a.bondWith = b.id; b.bondWith = a.id;
-  a.bondUntil = b.bondUntil = w.time + WORLD.bondSeconds;
-  a.receptiveFor = b.receptiveFor = 0;
-  a.cooldown.court = b.cooldown.court = a.bondUntil + 30;
-  a.action = b.action = 'idle';
-  a.lockUntil = b.lockUntil = w.time + 1.6;
-  a.target = b.target = null;
-  a.goal = b.goal = null; a.path = b.path = null;
-  w.fx.push({ kind: 'hearts', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 10 });
-  useStore.getState().pushEvent({ kind: 'love', text: `${a.name} and ${b.name} fell in love.`, actors: [a.id, b.id] });
+  a.x = clamp(a.x, 8, w.city.w - 8);
+  a.y = clamp(a.y, 8, w.city.h - 8);
 }
 
 // ---- store publishing ----------------------------------------------------------------
@@ -535,13 +446,14 @@ function publish(w: WorldState) {
   const s = useStore.getState();
   if (s.selectedId !== lastFocusId) { lastFocusId = s.selectedId; w.brain?.focus(s.selectedId); }
   const citizens: CitizenView[] = w.agents.map(a => {
-    const inputs = a.inputs.slice();
-    const outputs = a.outputs.slice();
-    a.thought = w.brain ? w.brain.thoughtFor(outputs, inputs, a.body, a.sex) : '';
+    a.thought = thoughtOf(w, a);
     return {
       id: a.id, name: a.name, sex: a.sex, x: a.x, y: a.y, heading: a.heading, action: a.action,
+      goal: a.goal?.name ?? 'idle',
+      actionT: a.actionT, actionPhase: a.actionPhase, speedNorm: a.speedNorm, facing: a.facing,
       hunger: a.body.hunger, dust: a.body.dust, energy: a.body.energy, injury: a.body.injury,
-      bondWith: a.bondWith, target: a.target, inputs, outputs, thought: a.thought, palette: a.palette,
+      bondWith: a.bondWith, target: a.target, inputs: a.inputs.slice(), outputs: a.outputs.slice(),
+      drives: { ...a.drives }, thought: a.thought, palette: a.palette,
     };
   });
   const focus = w.brain?.latestFocus ?? null;
@@ -554,8 +466,7 @@ function publish(w: WorldState) {
 
 // ---- WorldApi ------------------------------------------------------------------------
 function registerApi(w: WorldState) {
-  const ctx = () => ({ agents: w.agents, city: w.city, now: w.time, daylight: w.daylight });
-  const get = (id: number) => byId(ctx(), id);
+  const get = (id: number) => w.agents.find(a => a.id === id) ?? null;
   const god = (text: string, actors: number[]) => useStore.getState().pushEvent({ kind: 'god', text, actors });
   const ring = (a: Agent) => w.fx.push({ kind: 'godRing', x: a.x, y: a.y, id: a.id });
   const inject = (id: number, target: InjectTarget, gainMv: number, ms: number) => w.brain?.inject(id, target, gainMv, ms);
@@ -573,48 +484,111 @@ function registerApi(w: WorldState) {
       fight(aId, bId) {
         const a = get(aId), b = get(bId);
         if (!a || !b || a === b) return;
-        for (const x of [a, b]) { inject(x.id, { channel: 'aggression' }, 12, 4000); x.cooldown.fight = 0; ring(x); }
-        a.target = b.id; b.target = a.id;
-        setGoal(w, a, { x: b.x, y: b.y }, 'target'); setGoal(w, b, { x: a.x, y: a.y }, 'target');
-        a.action = b.action = 'walk'; a.lockUntil = b.lockUntil = 0; a.idleUntil = b.idleUntil = 0;
+        for (const x of [a, b]) { inject(x.id, { channel: 'aggression' }, 12, 6000); x.cooldown.fight = 0; ring(x); }
+        startGoal(w, a, 'confront', { partner: b, forced: true, score: 1 });   // approach -> stare -> blows -> loser flees
         god(`You stirred a fight between ${a.name} and ${b.name}.`, [a.id, b.id]);
       },
       love(aId, bId) {
         const a = get(aId), b = get(bId);
         if (!a || !b || a === b) return;
-        for (const x of [a, b]) { inject(x.id, { channel: 'courtship' }, 10, 6000); x.cooldown.court = 0; x.bondWith = null; ring(x); }
-        a.target = b.id; b.target = a.id;
-        setGoal(w, a, { x: b.x, y: b.y }, 'target'); setGoal(w, b, { x: a.x, y: a.y }, 'target');
-        a.action = b.action = 'walk'; a.lockUntil = b.lockUntil = 0; a.idleUntil = b.idleUntil = 0;
-        // if neither is a male the sing/receptivity loop can't start; help it along
-        if (a.sex === b.sex) { a.receptiveFor = b.receptiveFor = 1.5; }
+        const [m, f] = a.sex === 'female' && b.sex === 'male' ? [b, a] : [a, b];   // the male role sings
+        for (const x of [m, f]) { x.bondWith = null; x.cooldown.court = 0; x.cooldown.courted = 0; ring(x); }
+        inject(m.id, { channel: 'courtship' }, 10, 8000);
+        inject(f.id, { channel: 'courtship' }, 10, 8000);     // receptivity (silent in female bodies of this brain; godReceptive covers it)
+        f.godReceptive = w.time + 40;
+        startGoal(w, m, 'court', { partner: f, forced: true, score: 1 });
         god(`You nudged ${a.name} and ${b.name} together.`, [a.id, b.id]);
       },
       feed(id) {
         const a = get(id); if (!a) return;
-        a.body.hunger = 1; inject(a.id, { channel: 'odorFood' }, 8, 4000); ring(a);
-        setGoal(w, a, nearestFood(w.city, a), 'food'); a.idleUntil = 0;
+        a.body.hunger = 1; a.godFeedUntil = w.time + 90; inject(a.id, { channel: 'odorFood' }, 8, 4000); ring(a);
+        a.cooldown.eatOut = 0;
+        startGoal(w, a, 'eatOut', { forced: true, score: 1 });
         god(`You made ${a.name} ravenous.`, [a.id]);
       },
       scare(id) {
         const a = get(id); if (!a) return;
         inject(a.id, { channel: 'visionLoomL' }, 16, 500); inject(a.id, { channel: 'visionLoomR' }, 16, 500);
-        const ang = rand() * Math.PI * 2;
-        a.escapeFrom = { x: a.x + Math.cos(ang) * 30, y: a.y + Math.sin(ang) * 30 };
-        a.escapeUntil = w.time + 0.8; a.cooldown.escape = 0; ring(a);
+        const ang = w.rand() * Math.PI * 2;
+        a.cooldown.flee = 0;
+        startGoal(w, a, 'flee', { threat: { x: a.x + Math.cos(ang) * 30, y: a.y + Math.sin(ang) * 30 }, forced: true, score: 1 });
+        ring(a);
         god(`You startled ${a.name}.`, [a.id]);
       },
       dust(id) {
         const a = get(id); if (!a) return;
-        a.body.dust = 1; inject(a.id, { channel: 'touchAntenna' }, 8, 3000); ring(a);
+        a.body.dust = 1; inject(a.id, { channel: 'touchAntenna' }, 8, 3000); a.cooldown.groom = 0; ring(a);
         w.fx.push({ kind: 'puff', x: a.x, y: a.y, id: a.id });
+        startGoal(w, a, 'groom', { forced: true, score: 1 });
         god(`You dusted ${a.name}.`, [a.id]);
       },
       sleep(id) {
         const a = get(id); if (!a) return;
         inject(a.id, { channel: 'sleep' }, 12, 8000); a.body.energy = Math.min(a.body.energy, 0.12);
-        a.cooldown.godSleep = w.time + 30; ring(a);
+        a.cooldown.godSleep = w.time + 30; a.cooldown.rest = 0; ring(a);
+        startGoal(w, a, 'rest', { forced: true, score: 1, spot: { x: a.x, y: a.y } });   // lies down right here
         god(`You made ${a.name} drowsy.`, [a.id]);
+      },
+      riot(around, radius = 260) {
+        const centre = around !== null ? get(around) : null;
+        const c: Pt = centre ? { x: centre.x, y: centre.y } : w.city.plazaCenter;
+        const crowd = w.agents.filter(a => dist(a, c) <= radius);
+        if (crowd.length < 2) { god('Nobody around to riot.', []); return; }
+        for (const a of crowd) { inject(a.id, { channel: 'aggression' }, 14, 20000); a.riotUntil = w.time + 90; a.cooldown.fight = 0; ring(a); }
+        // pair off by proximity; the odd one out joins the nearest brawl via riotChain
+        const pool = [...crowd];
+        while (pool.length >= 2) {
+          const a = pool.shift()!;
+          let bi = 0, bd = Infinity;
+          pool.forEach((b, i) => { const d = dist(a, b); if (d < bd) { bd = d; bi = i; } });
+          const b = pool.splice(bi, 1)[0];
+          startGoal(w, a, 'confront', { partner: b, forced: true, score: 1 });
+        }
+        god(`A riot breaks out near ${nearestPlaceName(w, c)}.`, crowd.map(a => a.id));
+      },
+      festival() {
+        for (const a of w.agents) { startGoal(w, a, 'festival', { forced: true, score: 1 }); ring(a); }
+        god('A festival begins on the plaza.', []);
+      },
+      loveWave() {
+        const taken = new Set<number>();
+        let n = 0;
+        for (const m of w.agents) {
+          if (m.sex !== 'male') continue;
+          let best: Agent | null = null, bd = Infinity;
+          for (const f of w.agents) { if (f.sex !== 'female' || taken.has(f.id)) continue; const d = dist(m, f); if (d < bd) { bd = d; best = f; } }
+          if (!best) break;
+          taken.add(best.id);
+          for (const x of [m, best]) { x.bondWith = null; x.cooldown.court = 0; x.cooldown.courted = 0; inject(x.id, { channel: 'courtship' }, 10, 20000); ring(x); }
+          if (w.rand() < 0.75) best.godReceptive = w.time + 60;      // most say yes, some turn him down
+          if (startGoal(w, m, 'court', { partner: best, forced: true, score: 1 })) {
+            m.goal!.forced = false; best.goal!.forced = false;        // evicted into courtship, but acceptance is hers
+            n++;
+          }
+        }
+        god(`Love is in the air: ${n} suitors set off.`, []);
+      },
+      panic(around) {
+        const centre = around !== null ? get(around) : null;
+        const c: Pt = centre ? { x: centre.x, y: centre.y } : w.city.plazaCenter;
+        for (const a of w.agents) {
+          inject(a.id, { channel: 'visionLoomL' }, 16, 800); inject(a.id, { channel: 'visionLoomR' }, 16, 800);
+          a.cooldown.flee = 0;
+          const from = dist(a, c) < 1 ? { x: c.x + 1, y: c.y } : c;
+          startGoal(w, a, 'flee', { threat: from, forced: true, score: 1 });
+          if (a.goal) a.goal.phaseUntil = w.time + 6;                  // a long dash, then look back
+          a.cooldown.wanderSlow = w.time + 20;
+        }
+        god(`Panic near ${nearestPlaceName(w, c)}!`, []);
+      },
+      calm() {
+        for (const a of w.agents) {
+          a.body.injury = 0; a.riotUntil = 0; a.hurtUntil = 0;
+          w.brain?.silence(a.id, { channel: 'aggression' }, 30000);
+          a.cooldown.fight = w.time + 30;
+          if (a.goal && (a.goal.name === 'confront' || a.goal.name === 'flee' || a.goal.name === 'festival')) abortGoal(w, a);
+        }
+        god('Calm settles over the town.', []);
       },
       reward(id) { const a = get(id); if (!a) return; inject(a.id, { channel: 'reward' }, 10, 2000); ring(a); god(`You rewarded ${a.name}.`, [a.id]); },
       punish(id) { const a = get(id); if (!a) return; inject(a.id, { channel: 'punish' }, 10, 2000); a.hurtUntil = w.time + 0.3; ring(a); god(`You punished ${a.name}.`, [a.id]); },
@@ -626,6 +600,13 @@ function registerApi(w: WorldState) {
     },
   };
   setWorldApi(api);
+}
+
+/** Name of the nearest landmark, for event text. */
+function nearestPlaceName(w: WorldState, p: Pt): string {
+  let best = 'the plaza', bd = Infinity;
+  for (const poi of w.city.pois) { if (!poi.name) continue; const d = dist(poi, p); if (d < bd) { bd = d; best = poi.name === 'Fountain' ? 'the fountain' : poi.name === 'Plaza' ? 'the plaza' : poi.name === 'Park' ? 'the park' : poi.name; } }
+  return best;
 }
 
 const describe = (t: InjectTarget) => 'channel' in t ? t.channel : 'typeId' in t ? `type #${t.typeId}` : `${t.neurons.length} neurons`;

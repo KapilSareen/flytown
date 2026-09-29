@@ -8,7 +8,12 @@ const readOnboarded = () => {
   try { return localStorage.getItem(ONBOARD_KEY) === '1'; } catch { return false; }
 };
 
+export type FlashTone = 'red' | 'pink' | 'amber' | 'cool';
+
 export interface UiState {
+  /** HUD-wide vignette flash after a town power; `n` re-triggers the animation. */
+  flash: { tone: FlashTone; n: number } | null;
+  triggerFlash(tone: FlashTone): void;
   rosterOpen: boolean;
   aboutOpen: boolean;
   onboardingOpen: boolean;
@@ -27,6 +32,8 @@ export interface UiState {
 }
 
 export const useUi = create<UiState>((set, get) => ({
+  flash: null,
+  triggerFlash: (tone) => set({ flash: { tone, n: (get().flash?.n ?? 0) + 1 } }),
   rosterOpen: true,
   aboutOpen: false,
   onboardingOpen: !readOnboarded(),

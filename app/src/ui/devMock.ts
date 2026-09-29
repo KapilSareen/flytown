@@ -62,6 +62,9 @@ function fakeCitizen(sex: Sex): CitizenView {
     x: rnd(0, 2000), y: rnd(0, 1400), heading: rnd(0, Math.PI * 2),
     action: pick(ACTIONS),
     actionT: rnd(0, 4), actionPhase: 'idle', speedNorm: rnd(0, 0.8), facing: rnd(0, Math.PI * 2),
+    goal: pick(['wander', 'eatOut', 'groom', 'court', 'rest', 'chat', 'bar']),
+    drives: { hunger: Math.random(), cleanliness: Math.random(), romance: Math.random(), hostility: Math.random() * 0.4,
+      fear: Math.random() * 0.3, fatigue: Math.random(), social: Math.random(), wander: Math.random() },
     hunger: Math.random(), dust: Math.random(), energy: Math.random(), injury: Math.random() * 0.3,
     bondWith: null, target: null,
     inputs: Float32Array.from({ length: NI }, () => Math.random() * 0.6),
@@ -120,6 +123,11 @@ export function installDevMock() {
       feed: (a) => { log('feed', a); ev('eat', a, null, 'is handed a sugar cube'); },
       scare: (a) => { log('scare', a); ev('escape', a, null, 'sees a shadow rushing in'); },
       dust: (a) => { log('dust', a); ev('groom', a, null, 'gets a face full of dust'); },
+      riot: (around, radius) => { log('riot', around, radius); town('fight', around === null ? 'A riot breaks out on the plaza' : `A riot breaks out around ${nameOf(around)}`, around); },
+      festival: () => { log('festival'); town('sing', 'A festival begins on the plaza', null); },
+      loveWave: () => { log('loveWave'); town('love', 'Love sweeps through the whole town', null); },
+      panic: (around) => { log('panic', around); town('escape', around === null ? 'Panic spreads from the plaza' : `Panic spreads out from ${nameOf(around)}`, around); },
+      calm: () => { log('calm'); town('info', 'Calm settles over the town; everyone is healed', null); },
       sleep: (a) => { log('sleep', a); ev('sleep', a, null, 'feels the night coming'); },
       reward: (a) => { log('reward', a); ev('god', a, null, 'is rewarded'); },
       punish: (a) => { log('punish', a); ev('god', a, null, 'is punished'); },
@@ -146,6 +154,14 @@ export function installDevMock() {
     },
   };
 
+  const nameOf = (id: number) => store.getState().citizens.find((c) => c.id === id)?.name ?? 'someone';
+  const town = (kind: EventKind, text: string, around: number | null) => {
+    const s = store.getState();
+    s.pushEvent({ kind, text, actors: around === null ? [] : [around] });
+    // make it visible: flip everyone's action for a while
+    const act: Action = kind === 'fight' ? 'fight' : kind === 'sing' ? 'sing' : kind === 'love' ? 'court' : kind === 'escape' ? 'escape' : 'idle';
+    store.setState({ citizens: s.citizens.map((c) => ({ ...c, action: act, injury: kind === 'info' ? 0 : c.injury })) });
+  };
   const ev = (kind: EventKind, a: number, b: number | null, verb: string) => {
     const s = store.getState();
     const na = s.citizens.find((c) => c.id === a)?.name ?? '?';

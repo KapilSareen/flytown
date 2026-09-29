@@ -73,3 +73,18 @@ export const IconGrid = ({ size = 16, ...r }: P) => (
 export const IconKeyboard = ({ size = 16, ...r }: P) => (
   <svg {...base(size, r)}><rect x="1.5" y="4" width="13" height="8" rx="1.5" /><path d="M4 7h.1M6.5 7h.1M9 7h.1M11.5 7h.1M5 9.5h6" /></svg>
 );
+export const IconRiot = ({ size = 16, ...r }: P) => (
+  <svg {...base(size, r)}><path d="M8 1.5 9.5 5.5l3-2-1 3.5 3 1-3 1.5 1.5 3.5-3.5-1.5L8 14.5l-1.5-3-3.5 1.5L4.5 9.5l-3-1.5 3-1-1-3.5 3 2z" /></svg>
+);
+export const IconFestival = ({ size = 16, ...r }: P) => (
+  <svg {...base(size, r)}><path d="M3 14.5 6 5l5 5z" /><path d="M8.5 2.5v.1M12.5 4.5v.1M13.5 9v.1M10.5 1.5v.1" strokeWidth={2} /><path d="M9.5 3.5c1-1 2-1 3 0M11 7c1 0 2 .5 2.5 1.5" /></svg>
+);
+export const IconLoveWave = ({ size = 16, ...r }: P) => (
+  <svg {...base(size, r)}><path d="M8 10.5S4 8 4 5.6A2 2 0 0 1 8 4.8a2 2 0 0 1 4 .8c0 2.4-4 4.9-4 4.9z" /><path d="M1.5 13c1.5 1.2 3 1.2 4.5 0s3-1.2 4.5 0 3 1.2 4 0" /></svg>
+);
+export const IconPanic = ({ size = 16, ...r }: P) => (
+  <svg {...base(size, r)}><path d="M8 2 14.5 13.5h-13z" /><path d="M8 6.5v3.5M8 12v.2" /></svg>
+);
+export const IconCalm = ({ size = 16, ...r }: P) => (
+  <svg {...base(size, r)}><path d="M2 6c2-1.3 4-1.3 6 0s4 1.3 6 0M2 10c2-1.3 4-1.3 6 0s4 1.3 6 0" /></svg>
+);

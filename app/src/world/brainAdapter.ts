@@ -76,7 +76,7 @@ export async function loadBrain(onProgress: ProgressFn): Promise<Brain> {
         return new LifBrain(pool, thought);
       }
     } catch (err) {
-      console.warn('[drosopolis] real brain failed to load, using MockBrain', err);
+      console.warn('[flytown] real brain failed to load, using MockBrain', err);
     }
   }
   onProgress('Starting mock brain', 0.9);

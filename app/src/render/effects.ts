@@ -3,7 +3,7 @@
 
 import { Container, Graphics } from 'pixi.js';
 
-type Kind = 'heart' | 'spark' | 'zzz' | 'ripple' | 'puff' | 'streak' | 'godRing' | 'water';
+type Kind = 'heart' | 'spark' | 'zzz' | 'ripple' | 'puff' | 'streak' | 'godRing' | 'water' | 'steam' | 'dust';
 
 interface Particle {
   kind: Kind; g: Graphics;
@@ -24,6 +24,8 @@ const draw: Record<Kind, (g: Graphics) => void> = {
   puff: g => { g.circle(0, 0, 4).fill({ color: 0xd9d2c2, alpha: 0.8 }); },
   streak: g => { g.roundRect(-8, -1, 16, 2, 1).fill({ color: 0xffffff, alpha: 0.7 }); },
   godRing: g => { g.circle(0, 0, 18).stroke({ color: 0xf2c14e, width: 2.5, alpha: 0.95 }); },
+  steam: g => { g.circle(0, 0, 5).fill({ color: 0xffffff, alpha: 0.35 }); },
+  dust: g => { g.circle(0, 0, 7).fill({ color: 0xcdbfa6, alpha: 0.6 }); },
 };
 
 export class Effects {
@@ -57,6 +59,8 @@ export class Effects {
   }
   streak(x: number, y: number, heading: number) { this.spawn('streak', x - Math.cos(heading) * 10, y - 8 - Math.sin(heading) * 10, 0, 0, 0.22, 1, heading); }
   godRing(x: number, y: number) { this.spawn('godRing', x, y, 0, 0, 0.7, 0.4); }
+  steam(x: number, y: number) { this.spawn('steam', x, y - 10, (Math.random() - 0.5) * 6, -12 - Math.random() * 8, 2.2, 0.5 + Math.random() * 0.4); }
+  dustCloud(x: number, y: number, n = 5) { for (let i = 0; i < n; i++) this.spawn('dust', x + (Math.random() - 0.5) * 16, y - 4, (Math.random() - 0.5) * 30, -6 - Math.random() * 10, 0.9, 0.5 + Math.random() * 0.6); }
 
   update(dt: number) {
     for (let i = this.live.length - 1; i >= 0; i--) {
@@ -82,6 +86,8 @@ export class Effects {
         case 'puff': g.alpha = 0.8 * (1 - u); g.scale.set(p.scale * (1 + u * 1.5)); break;
         case 'streak': g.alpha = 0.7 * (1 - u); g.scale.set(1 + u, 1); break;
         case 'godRing': g.scale.set(p.scale + u * 1.6); g.alpha = 1 - u; break;
+        case 'steam': g.alpha = 0.5 * Math.sin(u * Math.PI); g.scale.set(p.scale * (1 + u * 2.2)); p.x += Math.sin(p.life * 3) * 6 * dt; break;
+        case 'dust': g.alpha = 0.7 * (1 - u); g.scale.set(p.scale * (1 + u * 1.8)); p.vx *= 0.93; break;
       }
       g.position.set(p.x, p.y);
     }

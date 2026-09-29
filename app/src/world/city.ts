@@ -1,4 +1,4 @@
-// Procedural town layout for Drosopolis. Pure data: rectangles, points of interest and a
+// Procedural town layout for Flytown. Pure data: rectangles, points of interest and a
 // coarse walkability grid. The renderer draws from this, the simulation paths over it.
 //
 // World is WORLD_W x WORLD_H px. A 4 x 3 grid of blocks separated by roads; two of the
@@ -15,21 +15,37 @@ export const GRID_H = WORLD_H / CELL;                 // 80
 export interface Rect { x: number; y: number; w: number; h: number }
 export interface Pt { x: number; y: number }
 
-export type BuildingKind = 'house' | 'cafe' | 'market' | 'bar' | 'shop';
+export type BuildingKind = 'house' | 'cafe' | 'market' | 'bar' | 'shop' | 'kiosk';
+export type RoofKind = 'terracotta' | 'flat' | 'green' | 'glass' | 'shop';
 export interface Building extends Rect {
   kind: BuildingKind;
+  roof: RoofKind;
   color: number;        // wall/roof base colour
   floors: number;       // 1..3, drives roof shade + window rows
   door: Pt;             // where the entrance faces the sidewalk
   name?: string;
 }
 
-export type PoiKind = 'cafe' | 'market' | 'garbage' | 'bar' | 'bench' | 'fountain' | 'park' | 'plaza' | 'lamp' | 'tree';
+export type PoiKind = 'cafe' | 'market' | 'garbage' | 'bar' | 'bench' | 'fountain' | 'park' | 'plaza' | 'lamp' | 'tree' | 'pond' | 'planter' | 'bikerack';
 export interface Poi extends Pt {
   kind: PoiKind;
   r: number;            // interaction radius (px)
   name?: string;
 }
+
+/** A place to eat: a café chair (facing its table) or a standing slot at the market stall. */
+export interface Seat extends Pt {
+  venue: number;        // index into City.food
+  table: number;        // table id within the venue (market: 0)
+  facing: number;       // radians the sitter faces (toward the table / stall)
+  standing: boolean;    // market slots are standing
+}
+
+/** Continuous obstacle used for the per-step position clamp (and to block the grid). */
+export type Obstacle =
+  | { kind: 'rect'; tag: ObstacleTag; x: number; y: number; w: number; h: number }
+  | { kind: 'circle'; tag: ObstacleTag; x: number; y: number; r: number; venue?: number; table?: number };
+export type ObstacleTag = 'building' | 'fountain' | 'pond' | 'tree' | 'lamp' | 'bench' | 'planter' | 'table' | 'stall';
 
 export interface Block extends Rect {
   col: number; row: number;
@@ -47,12 +63,17 @@ export interface City {
   buildings: Building[];
   pois: Poi[];
   food: Poi[];          // cafés + market (odorFood emitters, sugar taste on tile)
+  seats: Seat[];        // terrace chairs / stall slots, grouped by venue (index into food)
+  obstacles: Obstacle[]; // everything a citizen cannot walk through (see docs/RENDER_API.md)
   garbage: Poi[];
   benches: Poi[];
   lamps: Poi[];
   trees: Poi[];
   bar: Poi;
   fountain: Poi;
+  pond: Poi;            // in the park; not walkable
+  planters: Poi[];
+  bikeracks: Poi[];
   plazaCenter: Pt;
   parkCenter: Pt;
   /** 0 = blocked, 1 = sidewalk/open (cost 1), 2 = road (cost 3), 3 = grass/park (cost 1.2) */
@@ -127,7 +148,8 @@ export function buildCity(seed = 7): City {
       side === 's' ? { x: door.x, y: door.y + 34 } :
       side === 'e' ? { x: door.x + 34, y: door.y } : { x: door.x - 34, y: door.y };
     const color = kind === 'cafe' ? 0xe8d5c0 : kind === 'market' ? 0xd7dcc3 : kind === 'bar' ? 0xc8b7c9 : 0xd9cfc1;
-    const bld: Building = { x, y, w, h, kind, color, floors: kind === 'bar' ? 2 : 1, door, name };
+    const roof: RoofKind = kind === 'cafe' ? 'terracotta' : kind === 'market' ? 'green' : 'flat';
+    const bld: Building = { x, y, w, h, kind, roof, color, floors: kind === 'bar' ? 2 : 1, door, name };
     buildings.push(bld);
     return { bld, terrace };
   };
@@ -143,6 +165,24 @@ export function buildCity(seed = 7): City {
     addPoi({ ...market.terrace, kind: 'market', r: 50, name: market.bld.name }),
   ];
   const bar = addPoi({ ...barV.terrace, kind: 'bar', r: 60, name: barV.bld.name });
+
+  // Seats. Cafés: three terrace tables (as drawn), two chairs each, facing the table.
+  // Market: five standing slots in front of the stall, facing it.
+  const seats: Seat[] = [];
+  const tableSeats = (venue: number, terrace: Pt, side: 'n' | 's' | 'e' | 'w') => {
+    const horiz = side === 'n' || side === 's';
+    const tables: Pt[] = ([[-36, 0], [0, 8], [36, 0]] as const).map(([ox, oy]) => horiz ? { x: terrace.x + ox, y: terrace.y + oy } : { x: terrace.x + oy, y: terrace.y + ox });
+    tables.forEach((t, ti) => {
+      const offs = horiz ? [[-12, 0], [12, 0]] : [[0, -12], [0, 12]];
+      for (const [ox, oy] of offs) seats.push({ x: t.x + ox, y: t.y + oy, venue, table: ti, facing: Math.atan2(-oy, -ox), standing: false });
+    });
+  };
+  tableSeats(0, cafeA.terrace, 's');
+  tableSeats(1, cafeB.terrace, 'n');
+  for (let i = 0; i < 5; i++) {
+    const x = market.terrace.x - 44 + i * 22, y = market.terrace.y + 14;
+    seats.push({ x, y, venue: 2, table: 0, facing: -Math.PI / 2, standing: true });
+  }
 
   // Garbage corner: NE block, in the corner of the sidewalk.
   const gBlock = blocks[0 * cols + 3];
@@ -173,21 +213,39 @@ export function buildCity(seed = 7): City {
   bench(park.inner.x + park.inner.w - 60, park.inner.y + park.inner.h - 60);
   bench(parkCenter.x, park.inner.y + park.inner.h - 30);
 
+  // Pond in the park's north-east quadrant; trees keep clear of it.
+  const pond = addPoi({ x: parkCenter.x + 125, y: parkCenter.y - 92, kind: 'pond', r: 58, name: 'Pond' });
   const trees: Poi[] = [];
-  for (let i = 0; i < 14; i++) {
-    // scattered in the park, avoiding the very centre (a small lawn)
+  for (let i = 0; i < 16; i++) {
+    // scattered in the park, avoiding the very centre (a small lawn) and the pond
     const ang = rand() * Math.PI * 2;
     const rad = 70 + rand() * 130;
     const x = parkCenter.x + Math.cos(ang) * rad * 1.15;
     const y = parkCenter.y + Math.sin(ang) * rad * 0.85;
+    if (Math.hypot(x - pond.x, y - pond.y) < pond.r + 40) continue;
     trees.push(addPoi({ x, y, kind: 'tree', r: 22 + rand() * 14 }));
   }
+  // Kiosk on the plaza's north-west corner.
+  buildings.push({
+    x: plaza.inner.x + 30, y: plaza.inner.y + 30, w: 36, h: 36, kind: 'kiosk', roof: 'terracotta', color: 0xd6b56a, floors: 1,
+    door: { x: plaza.inner.x + 48, y: plaza.inner.y + 66 }, name: 'Kiosk',
+  });
   // a few street trees along sidewalks
   for (const b of blocks) {
     if (b.kind !== 'buildings') continue;
     if (rand() < 0.6) trees.push(addPoi({ x: b.x + 10, y: b.y + b.h / 2 + (rand() - 0.5) * 120, kind: 'tree', r: 18 }));
     if (rand() < 0.6) trees.push(addPoi({ x: b.x + b.w - 10, y: b.y + b.h / 2 + (rand() - 0.5) * 120, kind: 'tree', r: 18 }));
   }
+
+  // Planters along building-block sidewalks and bike racks beside the cafés.
+  const planters: Poi[] = [];
+  const bikeracks: Poi[] = [];
+  for (const b of blocks) {
+    if (b.kind !== 'buildings') continue;
+    planters.push(addPoi({ x: b.x + b.w * 0.3, y: b.y + 12, kind: 'planter', r: 12 }));
+    planters.push(addPoi({ x: b.x + b.w * 0.7, y: b.y + b.h - 12, kind: 'planter', r: 12 }));
+  }
+  for (const f of [cafeA, cafeB]) bikeracks.push(addPoi({ x: f.terrace.x + 70, y: f.terrace.y, kind: 'bikerack', r: 14 }));
 
   // Street lamps at every block corner (on the sidewalk).
   const lamps: Poi[] = [];
@@ -216,8 +274,11 @@ export function buildCity(seed = 7): City {
         const clash = occupied.some(o => intersects(grow(o, 24), cand));
         if (!clash && hh > 50) {
           const floors = 1 + Math.floor(rand() * 3);
+          const kind: BuildingKind = rand() < 0.2 ? 'shop' : 'house';
+          const rr = rand();
+          const roof: RoofKind = kind === 'shop' ? 'shop' : rr < 0.4 ? 'terracotta' : rr < 0.7 ? 'flat' : rr < 0.85 ? 'green' : 'glass';
           buildings.push({
-            ...cand, kind: rand() < 0.2 ? 'shop' : 'house',
+            ...cand, kind, roof,
             color: PALETTE_WALLS[Math.floor(rand() * PALETTE_WALLS.length)],
             floors,
             door: { x: cand.x + cand.w / 2, y: ci === 0 ? cand.y + cand.h : cand.y },
@@ -227,6 +288,27 @@ export function buildCity(seed = 7): City {
       }
     }
   }
+
+  // Continuous obstacles: buildings, fountain basin, pond, tree trunks, lamp posts, benches,
+  // planters, terrace tables and the market stall. The grid below is blocked from this list.
+  const obstacles: Obstacle[] = [];
+  for (const b of buildings) obstacles.push({ kind: 'rect', tag: 'building', x: b.x, y: b.y, w: b.w, h: b.h });
+  obstacles.push({ kind: 'circle', tag: 'fountain', x: fountain.x, y: fountain.y, r: 33 });
+  obstacles.push({ kind: 'circle', tag: 'pond', x: pond.x, y: pond.y, r: pond.r * 0.85 });
+  for (const t of trees) obstacles.push({ kind: 'circle', tag: 'tree', x: t.x, y: t.y, r: 4 });
+  for (const l of lamps) obstacles.push({ kind: 'circle', tag: 'lamp', x: l.x, y: l.y, r: 3 });
+  for (const b of benches) obstacles.push({ kind: 'rect', tag: 'bench', x: b.x - 12, y: b.y - 4, w: 24, h: 8 });
+  for (const p of planters) obstacles.push({ kind: 'rect', tag: 'planter', x: p.x - 12, y: p.y - 6, w: 24, h: 12 });
+  const tableSet = new Set<string>();
+  for (const s of seats) {
+    if (s.standing) continue;
+    const key = `${s.venue}:${s.table}`;
+    if (tableSet.has(key)) continue;
+    tableSet.add(key);
+    const tx = s.x + Math.cos(s.facing) * 12, ty = s.y + Math.sin(s.facing) * 12;   // the table is 12 px in front of the chair
+    obstacles.push({ kind: 'circle', tag: 'table', x: tx, y: ty, r: 6, venue: s.venue, table: s.table });
+  }
+  obstacles.push({ kind: 'rect', tag: 'stall', x: market.terrace.x - 52, y: market.terrace.y - 10, w: 104, h: 14 });
 
   // Walkability grid.
   const grid = new Uint8Array(GRID_W * GRID_H);
@@ -243,18 +325,25 @@ export function buildCity(seed = 7): City {
       grid[gy * GRID_W + gx] = v;
     }
   }
-  // Buildings (with a small clearance) and the fountain basin are blocked.
-  const block = (r: Rect) => {
-    const x0 = Math.max(0, Math.floor(r.x / CELL)), x1 = Math.min(GRID_W - 1, Math.floor((r.x + r.w) / CELL));
-    const y0 = Math.max(0, Math.floor(r.y / CELL)), y1 = Math.min(GRID_H - 1, Math.floor((r.y + r.h) / CELL));
-    for (let gy = y0; gy <= y1; gy++) for (let gx = x0; gx <= x1; gx++) grid[gy * GRID_W + gx] = 0;
-  };
-  for (const b of buildings) block(grow(b, 4));
-  block({ x: fountain.x - 30, y: fountain.y - 30, w: 60, h: 60 });
+  // Block every cell whose centre lies inside an obstacle (buildings with a small clearance).
+  // Small props only block a cell when they sit near its centre, so paths stay natural; the
+  // continuous clamp in world.ts handles the rest.
+  for (let gy = 0; gy < GRID_H; gy++) {
+    for (let gx = 0; gx < GRID_W; gx++) {
+      const x = gx * CELL + CELL / 2, y = gy * CELL + CELL / 2;
+      for (const o of obstacles) {
+        if (o.tag === 'table') continue;                       // chairs sit around tables
+        const hit = o.kind === 'rect'
+          ? inRect(x, y, grow(o, o.tag === 'building' ? 4 : 0))
+          : Math.hypot(o.x - x, o.y - y) < o.r + (o.tag === 'fountain' || o.tag === 'pond' ? 4 : 0);
+        if (hit) { grid[gy * GRID_W + gx] = 0; break; }
+      }
+    }
+  }
 
   return {
     w: WORLD_W, h: WORLD_H, margin, roadW, sidewalkW,
-    blocks, roadsH, roadsV, buildings, pois, food, garbage, benches, lamps, trees, bar, fountain,
+    blocks, roadsH, roadsV, buildings, pois, food, seats, obstacles, garbage, benches, lamps, trees, bar, fountain, pond, planters, bikeracks,
     plazaCenter, parkCenter, grid,
   };
 }

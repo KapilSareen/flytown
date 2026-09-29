@@ -9,6 +9,7 @@ import { Application, Container } from 'pixi.js';
 import { useStore } from '../store';
 import type { Agent } from '../world/agent';
 import { getWorld, type WorldState } from '../world/world';
+import { Ambient } from './ambient';
 import { Camera } from './camera';
 import { Character } from './character';
 import { drawCity, drawShadows, type CityLayers } from './cityRender';
@@ -40,10 +41,16 @@ export async function startRenderer(host: HTMLElement, world: WorldState): Promi
   const citizens = new Container();
   citizens.sortableChildren = true;               // y-sort so nearer figures overlap farther ones
   const charShadows = new Container();
-  lit.addChild(city.ground, city.shadows, charShadows, city.buildings, city.furniture, citizens, city.canopies);
+  // Static town baked once into a texture (ground + buildings + props); shadows and moving
+  // things are drawn above it.
+  const baked = new Container();
+  baked.addChild(city.ground, city.buildings, city.furniture);
+  baked.cacheAsTexture({ antialias: true, resolution: 1.5 });
+  lit.addChild(baked, city.shadows, charShadows, citizens, city.trees);
   const effects = new Effects();
+  const ambient = new Ambient(world.city, effects);
   const labels = new Container();
-  unlit.addChild(city.windows, city.lamps, effects.layer, labels, city.labels);
+  unlit.addChild(city.windows, city.lamps, city.neon, ambient.layer, effects.layer, labels, city.labels);
 
   const camera = new Camera(app, root, world.city.w, world.city.h, () => world.agents);
   // start on the plaza
@@ -52,7 +59,7 @@ export async function startRenderer(host: HTMLElement, world: WorldState): Promi
   const chars = new Map<number, Character>();
   const emitAcc = new Map<number, number>();      // per-agent timers for continuous effects
   let lastShadowHour = -1;
-  let waterAcc = 0;
+  let now = 0;
 
   const tick = () => {
     const dt = Math.min(0.1, app.ticker.deltaMS / 1000);
@@ -63,8 +70,21 @@ export async function startRenderer(host: HTMLElement, world: WorldState): Promi
     // sun-dependent statics
     if (Math.abs(w.hour - lastShadowHour) > 0.2) { lastShadowHour = w.hour; drawShadows(city.shadows, w.city, sun); }
     lit.tint = sun.tint;
-    city.windows.alpha = sun.lights;
     city.lamps.alpha = sun.lights;
+    city.neon.alpha = sun.lights * (Math.random() < 0.02 ? 0.5 : 1);
+    // windows switch on group by group at dusk (with a short flicker) and off late at night
+    for (const wg of city.windowGroups) {
+      const h = w.hour < 12 ? w.hour + 24 : w.hour;
+      const on = h >= wg.onAt && h < wg.offAt;
+      const sinceOn = (h - wg.onAt) * 150;             // game-hour -> real seconds (game day = 360 s)
+      wg.g.alpha = on ? (sinceOn < 0.8 ? (Math.random() < 0.6 ? 1 : 0.2) : 1) * Math.min(1, sun.lights + 0.2) : 0;
+    }
+    for (const t of city.treeList) {
+      const sway = Math.sin(now * 0.8 + t.phase) * 0.025;
+      t.c.rotation = sway;
+      t.c.scale.set(1 + Math.sin(now * 0.5 + t.phase) * 0.012);
+    }
+    now += dt;
     const charShadowLen = sun.daylight > 0.05 ? sun.shadowLen : 0;
 
     // sync characters with agents
@@ -93,17 +113,14 @@ export async function startRenderer(host: HTMLElement, world: WorldState): Promi
     for (const fx of w.fx) {
       switch (fx.kind) {
         case 'hearts': effects.hearts(fx.x, fx.y); break;
-        case 'sparks': effects.sparks(fx.x, fx.y); break;
+        case 'sparks': effects.sparks(fx.x, fx.y); effects.dustCloud(fx.x, fx.y); break;
         case 'puff': effects.puff(fx.x, fx.y); break;
         case 'godRing': effects.godRing(fx.x, fx.y); break;
         case 'flash': effects.godRing(fx.x, fx.y); break;
       }
     }
     w.fx.length = 0;
-    // fountain ripples
-    waterAcc += dt;
-    if (waterAcc > 0.9) { waterAcc = 0; effects.water(w.city.fountain.x, w.city.fountain.y); }
-
+    ambient.update(dt, w.agents, w.hour, sun.daylight);
     effects.update(dt);
     camera.update(dt);
   };

@@ -10,9 +10,11 @@ import { Onboarding } from './Onboarding';
 import { LoadingScreen } from './LoadingScreen';
 import { About } from './About';
 import { installDevMock } from './devMock';
+import { castTownPower } from './townPowers';
 import './hud.css';
 
 const SPEED_KEYS: Record<string, number> = { '1': 0.5, '2': 1, '3': 2, '4': 4 };
+const TOWN_KEYS = { r: 'riot', p: 'festival', l: 'loveWave', x: 'panic', c: 'calm' } as const;
 
 const isTyping = (t: EventTarget | null) =>
   t instanceof HTMLElement && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -34,11 +36,20 @@ function useHotkeys() {
         return;
       }
       const sp = SPEED_KEYS[e.key];
-      if (sp !== undefined) api.setSpeed(sp);
+      if (sp !== undefined) { api.setSpeed(sp); return; }
+      const town = TOWN_KEYS[e.key.toLowerCase() as keyof typeof TOWN_KEYS];
+      if (town) castTownPower(town);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+}
+
+/** 1.5 s HUD-wide vignette after a town power. Keyed on the counter so repeats re-trigger. */
+function Flash() {
+  const flash = useUi((s) => s.flash);
+  if (!flash) return null;
+  return <div key={flash.n} className={`flash ${flash.tone}`} aria-hidden />;
 }
 
 export function HUD() {
@@ -47,10 +58,11 @@ export function HUD() {
   useEffect(() => { installDevMock(); }, []);
 
   return (
-    <div className="hud">
+    <div className="hud" data-theme="light">
       {!ready && <LoadingScreen />}
       {ready && (
         <>
+          <Flash />
           <TopBar />
           <Roster />
           <Inspector />
