@@ -1,4 +1,4 @@
-# Drosopolis — neuron ↔ behaviour mapping (MaleCNS v1.0)
+# Flytown — neuron ↔ behaviour mapping (MaleCNS v1.0)
 
 Companion to `docs/ARCHITECTURE.md` section 2. Every channel below lists the MaleCNS cell types
 actually used by `tools/build_brain.py`, how many neurons were found, one line of biology and the

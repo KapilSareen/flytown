@@ -61,6 +61,7 @@ function fakeCitizen(sex: Sex): CitizenView {
     id, name, sex,
     x: rnd(0, 2000), y: rnd(0, 1400), heading: rnd(0, Math.PI * 2),
     action: pick(ACTIONS),
+    actionT: rnd(0, 4), actionPhase: 'idle', speedNorm: rnd(0, 0.8), facing: rnd(0, Math.PI * 2),
     hunger: Math.random(), dust: Math.random(), energy: Math.random(), injury: Math.random() * 0.3,
     bondWith: null, target: null,
     inputs: Float32Array.from({ length: NI }, () => Math.random() * 0.6),
@@ -76,6 +77,8 @@ export function installDevMock() {
   installed = true;
   const store = useStore;
   const log = (...a: unknown[]) => console.info('[worldApi]', ...a);
+  // The real world wins: if it has registered (or registers later), the mock steps aside.
+  const foreign = () => { const w = store.getState().worldApi; return w !== null && w !== api; };
 
   const api: WorldApi = {
     select: (id) => { log('select', id); store.setState({ selectedId: id }); },
@@ -154,6 +157,7 @@ export function installDevMock() {
   const phases = ['Fetching brain.bin.gz', 'Inflating', 'Building CSR', 'Starting workers', 'Warming up'];
   let pi = 0;
   const tick = () => {
+    if (foreign() || (store.getState().ready && store.getState().worldApi !== api)) { console.info('[mock] real world present, mock disabled'); return; }
     if (pi < phases.length) {
       store.setState({ loading: { phase: phases[pi], progress: (pi + 1) / (phases.length + 1) } });
       pi++;
@@ -173,8 +177,9 @@ export function installDevMock() {
     const regionNames = Object.keys(m.regions);
     let simT = 0;
     // world snapshot ~12 Hz
-    setInterval(() => {
+    const snap = setInterval(() => {
       const s = store.getState();
+      if (foreign()) { clearInterval(snap); clearInterval(amb); return; }
       if (s.paused) return;
       const dt = 1 / 12 * s.speed;
       simT += dt;
@@ -211,9 +216,9 @@ export function installDevMock() {
       ['eat', 'finds the pastry stall', false], ['groom', 'stops to clean up', false], ['sing', 'sings to', true],
       ['fight', 'shoves', true], ['love', 'is smitten with', true], ['sleep', 'dozes off on a bench', false], ['escape', 'bolts from a pigeon', false],
     ];
-    setInterval(() => {
+    const amb = setInterval(() => {
       const s = store.getState();
-      if (s.paused || s.citizens.length === 0) return;
+      if (foreign() || s.paused || s.citizens.length === 0) return;
       const [kind, verb, pair] = pick(verbs);
       const a = pick(s.citizens);
       const b = pair ? pick(s.citizens.filter((c) => c.id !== a.id)) : undefined;

@@ -4,19 +4,22 @@
 // composited every animation frame so the scroll is smooth between reports.
 import { useEffect, useMemo, useRef } from 'react';
 import type { BrainManifest, FocusReport } from '../brain/types';
+import { useStore } from '../store';
 import { regionColor } from './labels';
 
 const ROWS = 120;
-const COLS = 320;
+const COLS = 160; // 2px columns on a ~320px canvas: dots stay crisp, nothing aliases away
 
 interface Layout { rowOf: Uint8Array; rowColor: string[]; regionNames: string[] }
 
 function buildLayout(m: BrainManifest): Layout {
-  const n = Math.max(1, m.neurons);
   const regionNames = Object.keys(m.regions);
+  let maxIdx = 0;
+  for (const name of regionNames) for (const idx of m.regions[name]) if (idx > maxIdx) maxIdx = idx;
+  const n = Math.max(1, m.neurons, maxIdx + 1);
   const regionOf = new Uint8Array(n).fill(255);
   regionNames.forEach((name, ri) => {
-    for (const idx of m.regions[name]) if (idx < n && regionOf[idx] === 255) regionOf[idx] = ri;
+    for (const idx of m.regions[name]) if (regionOf[idx] === 255) regionOf[idx] = ri;
   });
   // rank neurons: by region order, then index; unassigned last
   const order = new Uint32Array(n);
@@ -34,7 +37,7 @@ function buildLayout(m: BrainManifest): Layout {
   return { rowOf, rowColor, regionNames };
 }
 
-export function SpikeRaster({ manifest, focus, agentId }: { manifest: BrainManifest; focus: FocusReport | null; agentId: number }) {
+export function SpikeRaster({ manifest, agentId }: { manifest: BrainManifest; focus?: FocusReport | null; agentId: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const layout = useMemo(() => buildLayout(manifest), [manifest]);
   const ring = useRef<{ canvas: HTMLCanvasElement; cursor: number; lastAt: number; interval: number; agent: number } | null>(null);
@@ -49,33 +52,43 @@ export function SpikeRaster({ manifest, focus, agentId }: { manifest: BrainManif
     return ring.current;
   };
 
-  // ingest one report window as one column
+  // ingest one report window as one column. Driven by the store directly so it
+  // works whether the world republishes a new focus object, the same object with a
+  // new spikes array, or even the same array mutated in place (signature check).
+  const lastSpikes = useRef<Uint32Array | null>(null);
+  const lastSig = useRef(-1);
   useEffect(() => {
-    if (!focus || focus.agentId !== agentId) return;
-    const r = getRing();
-    const ctx = r.canvas.getContext('2d');
-    if (!ctx) return;
-    if (r.agent !== agentId) { ctx.clearRect(0, 0, COLS, ROWS); r.agent = agentId; r.cursor = 0; }
-    const now = performance.now();
-    const dt = now - r.lastAt;
-    if (dt > 0 && dt < 2000) r.interval = r.interval * 0.8 + dt * 0.2;
-    r.lastAt = now;
-
-    const cnt = counts.current; cnt.fill(0);
-    const rowOf = layout.rowOf;
-    const sp = focus.spikes;
-    for (let i = 0; i < sp.length; i++) { const idx = sp[i]; if (idx < rowOf.length) cnt[rowOf[idx]]++; }
-    ctx.clearRect(r.cursor, 0, 1, ROWS);
-    for (let row = 0; row < ROWS; row++) {
-      const c = cnt[row];
-      if (!c) continue;
-      ctx.globalAlpha = Math.min(1, 0.45 + c * 0.25);
-      ctx.fillStyle = layout.rowColor[row];
-      ctx.fillRect(r.cursor, row, 1, 1);
-    }
-    ctx.globalAlpha = 1;
-    r.cursor = (r.cursor + 1) % COLS;
-  }, [focus, agentId, layout]);
+    const ingest = (focus: FocusReport | null) => {
+      if (!focus || focus.agentId !== agentId) return;
+      const sp = focus.spikes;
+      const sig = sp.length ^ ((sp[0] ?? 0) * 31) ^ ((sp[sp.length >> 1] ?? 0) * 131) ^ ((sp[sp.length - 1] ?? 0) * 1031);
+      if (sp === lastSpikes.current && sig === lastSig.current) return;
+      lastSpikes.current = sp; lastSig.current = sig;
+      const r = getRing();
+      const ctx = r.canvas.getContext('2d');
+      if (!ctx) return;
+      if (r.agent !== agentId) { ctx.clearRect(0, 0, COLS, ROWS); r.agent = agentId; r.cursor = 0; }
+      const now = performance.now();
+      const dt = now - r.lastAt;
+      if (dt > 0 && dt < 2000) r.interval = r.interval * 0.8 + dt * 0.2;
+      r.lastAt = now;
+      const cnt = counts.current; cnt.fill(0);
+      const rowOf = layout.rowOf;
+      for (let i = 0; i < sp.length; i++) { const idx = sp[i]; cnt[idx < rowOf.length ? rowOf[idx] : ROWS - 1]++; }
+      ctx.clearRect(r.cursor, 0, 1, ROWS);
+      for (let row = 0; row < ROWS; row++) {
+        const c = cnt[row];
+        if (!c) continue;
+        ctx.globalAlpha = Math.min(1, 0.6 + c * 0.2);
+        ctx.fillStyle = layout.rowColor[row];
+        ctx.fillRect(r.cursor, row, 1, 1);
+      }
+      ctx.globalAlpha = 1;
+      r.cursor = (r.cursor + 1) % COLS;
+    };
+    ingest(useStore.getState().focus);
+    return useStore.subscribe((s, prev) => { if (s.focus !== prev.focus || s.focus) ingest(s.focus); });
+  }, [agentId, layout]);
 
   // composite at display rate
   useEffect(() => {

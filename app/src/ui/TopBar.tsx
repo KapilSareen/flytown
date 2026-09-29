@@ -84,19 +84,25 @@ function PopulationControl({ males, females }: { males: number; females: number 
   );
 }
 
-const CL: [number, number][] = [[4, 10], [12, 4], [20, 12], [10, 18], [22, 20]];
-const CLL: [number, number][] = [[0, 1], [1, 2], [0, 3], [3, 2], [2, 4], [3, 4]];
+/** Mark: a minimal fly — dot body, two teardrop wings — that glows with the selected citizen's spikes. */
+function FlyMark() {
+  return (
+    <svg className="mark" width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <path className="wing" d="M8 9C6.2 6.4 3.2 4.2 1.4 4.6c-.9.3-.6 2 .5 3.1C3.4 9.3 6 10 8 9z" />
+      <path className="wing" d="M10 9c1.8-2.6 4.8-4.8 6.6-4.4.9.3.6 2-.5 3.1C14.6 9.3 12 10 10 9z" />
+      <circle className="body" cx="9" cy="9.6" r="2.3" />
+      <path d="M9 12v3.2" stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" opacity="0.7" />
+    </svg>
+  );
+}
 
-/** Wordmark: gradient display caps, a hairline that breathes with the selected citizen's spikes, a neuron cluster. */
+/** Wordmark: wide geometric caps in a gradient, a hairline that breathes with the selected citizen's spikes. */
 function Brand({ live }: { live: number }) {
   return (
     <div className="brand" style={{ '--live': live } as CSSProperties}>
-      <svg className="cluster" width="26" height="24" viewBox="0 0 26 24" aria-hidden>
-        {CLL.map(([a, b], i) => <line key={i} x1={CL[a][0]} y1={CL[a][1]} x2={CL[b][0]} y2={CL[b][1]} strokeWidth="1" />)}
-        {CL.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={i === 2 ? 2.4 : 1.7} style={{ animationDelay: `${i * 0.35}s` }} />)}
-      </svg>
+      <FlyMark />
       <div className="wordwrap">
-        <span className="word">DROSOPOLIS</span>
+        <span className="word">FLYTOWN</span>
         <span className="rule" />
         <span className="sub">a town of people with fly brains</span>
       </div>
@@ -129,7 +135,7 @@ export function TopBar() {
       <Brand live={live} />
 
       <div className="group hide-sm">
-        <div className="daytime" title="Time of day in Drosopolis">
+        <div className="daytime" title="Time of day in Flytown">
           <DayArc hour={timeOfDay} />
           <div className="t">
             <FlipNum value={fmtClock(timeOfDay)} />

@@ -1,6 +1,6 @@
-# Drosopolis — a town of people with fly brains
+# Flytown — a town of people with fly brains
 
-One-line pitch: every citizen of Drosopolis is a human-looking character whose
+One-line pitch: every citizen of Flytown is a human-looking character whose
 behaviour is produced by a real subgraph of the **MaleCNS v1.0** fruit-fly
 connectome (Janelia / Google Research, CC-BY 4.0), stepped as a
 leaky-integrate-and-fire (LIF) network with the parameters of Shiu et al. 2024

@@ -2,7 +2,7 @@
 // that lives in ../store and is only changed through worldApi.
 import { create } from 'zustand';
 
-const ONBOARD_KEY = 'drosopolis.onboarded.v1';
+const ONBOARD_KEY = 'flytown.onboarded.v1';
 
 const readOnboarded = () => {
   try { return localStorage.getItem(ONBOARD_KEY) === '1'; } catch { return false; }
