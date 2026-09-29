@@ -37,7 +37,10 @@ export function updateDrives(a: Agent, hour: number, daylight: number, dt: numbe
   const loom = Math.max(i[IN.visionLoomL], i[IN.visionLoomR]);
   // Provocation: two males lingering close (strong cVA / odorMale) builds up over ~3 s and decays.
   const crowded = a.sex === 'male' && i[IN.odorMale] > 0.5;
-  a.provoked = c01(a.provoked + (crowded ? 0.25 : -0.04) * dt);
+  // A packed plaza at a festival is a party, not a provocation: crowding only irritates
+  // outside festivals (riots still inject hostility directly).
+  const festive = a.goal?.name === 'festival';
+  a.provoked = c01(a.provoked + (crowded && !festive ? 0.25 : -0.04) * dt);
 
   // Female receptivity: the courtship readout, or (when that readout is male-only and hence
   // silent in female bodies) a documented proxy: she is not fleeing / backing away.

@@ -138,8 +138,9 @@ export function candidates(w: WorldState, a: Agent): Cand[] {
     const f = nearestWhere(w, a, o => o.sex === 'female' && o.bondWith === null && interruptible(o) && cd(w, o, 'courted'), GOAL.courtRange);
     if (f) out.push({ name: 'court', score: d.romance, partner: f });
   }
-  if (a.sex === 'male' && d.hostility > GOAL.hostileOn && cd(w, a, 'fight')) {
-    const m = nearestWhere(w, a, o => o.sex === 'male' && interruptible(o) && cd(w, o, 'fight'), GOAL.confrontRange);
+  const rioting = a.riotUntil > w.time;
+  if (a.sex === 'male' && d.hostility > GOAL.hostileOn && cd(w, a, 'fight') && (a.goal?.name !== 'festival' || rioting)) {
+    const m = nearestWhere(w, a, o => o.sex === 'male' && interruptible(o) && cd(w, o, 'fight') && (o.goal?.name !== 'festival' || rioting), GOAL.confrontRange);
     if (m) out.push({ name: 'confront', score: d.hostility, partner: m });
   }
   if (d.social > GOAL.socialOn && cd(w, a, 'chat')) {
