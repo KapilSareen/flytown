@@ -15,6 +15,18 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Boot-failure trap (inline so it exists before the module graph evaluates).
+      window.__showFatal = function (msg) {
+        var el = document.getElementById('fatal');
+        if (!el) { el = document.createElement('pre'); el.id = 'fatal';
+          el.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:99999;max-height:40vh;overflow:auto;margin:0;padding:12px 14px;border-radius:12px;background:#2a1414;color:#ffd7d7;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap';
+          (document.body || document.documentElement).appendChild(el); }
+        el.textContent += (el.textContent ? '\n' : '') + msg;
+      };
+      window.addEventListener('error', function (e) { window.__showFatal('error: ' + e.message + ' (' + (e.filename || '') + ':' + e.lineno + ')'); }, true);
+      window.addEventListener('unhandledrejection', function (e) { var r = e.reason; window.__showFatal('unhandled: ' + ((r && (r.stack || r.message)) || String(r))); });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
